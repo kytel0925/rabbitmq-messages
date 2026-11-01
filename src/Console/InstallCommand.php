@@ -3,101 +3,141 @@
 namespace SlothDevGuy\RabbitMQMessages\Console;
 
 use Illuminate\Console\Command;
+use Illuminate\Filesystem\Filesystem;
 
 /**
- * Class InstallCommand
- * @package SlothDevGuy\RabbitMQMessages\Console
+ * php artisan rabbitmq-messages:install
  */
 class InstallCommand extends Command
 {
-    /**
-     * @inheritdoc
-     * @var string
-     */
-    protected $name = 'rabbitmq-messages:install';
+    protected $signature = 'rabbitmq-messages:install
+                            {--connections= : Connections to keep in the published config: all, fanout or topic}
+                            {--force : Overwrite previously published files}';
+
+    protected $description = 'Publish the rabbitmq-messages configuration, migrations and worker scripts';
 
     /**
-     * @inheritdoc
-     * @var string
+     * Config blocks delimited by "// <name>" and "// </name>" markers.
      */
-    protected $description = 'Install migrations and configurations for rabbitmq-messages package';
+    protected const CONNECTION_BLOCKS = ['fanout', 'topic'];
 
-    /**
-     * @return void
-     */
-    public function handle(): void
+    protected const ENVIRONMENT = [
+        'common' => [
+            'RABBITMQ_APP_ID' => '"${APP_NAME}"',
+            'RABBITMQ_HOST' => 'rabbitmq',
+            'RABBITMQ_PORT' => '5672',
+            'RABBITMQ_USERNAME' => 'username',
+            'RABBITMQ_PASSWORD' => 'password',
+            'RABBITMQ_VHOST' => '/',
+            'RABBITMQ_QUEUE' => 'my-bounded-context.messages',
+            'RABBITMQ_RETRY_QUEUE' => 'my-bounded-context.messages.retry',
+            'RABBITMQ_RETRY_QUEUE_DELAY' => '3000',
+            'RABBITMQ_DEAD_LETTER_QUEUE' => 'my-bounded-context.messages.dead-letter',
+            'RABBITMQ_MESSAGES_MAX_TRIES' => '3',
+        ],
+        'fanout' => [
+            'RABBITMQ_EXCHANGE' => 'amq.fanout',
+        ],
+        'topic' => [
+            'RABBITMQ_TOPIC_EXCHANGE' => 'amq.topic',
+            'RABBITMQ_TOPIC_ROUTING_KEY' => '"my-bounded-context.#"',
+        ],
+    ];
+
+    public function handle(Filesystem $files): int
     {
-        $this->call('vendor:publish', ['--tag' => 'rabbitmq-messages-migrations']);
-        if($this->confirm('Warning! The following action may override files in your folder, do you wish to continue?')){
-            $connection = $this->choice('What connections do you want to use?', ['all', 'fanout', 'topic'], 'all');
-            $this->call('vendor:publish', ['--tag' => 'rabbitmq-messages-config', '--force' => true]);
-            $this->call('vendor:publish', ['--tag' => 'rabbitmq-messages-bin', '--force' => true]);
-            $this->cleanUpUnwantedConnections($connection);
-            $this->suggestEnvironments($connection);
+        $connections = $this->option('connections')
+            ?: $this->choice('Which connections do you want to use?', ['all', 'fanout', 'topic'], 'all');
+
+        if (! in_array($connections, ['all', 'fanout', 'topic'], true)) {
+            $this->components->error('--connections must be one of: all, fanout, topic.');
+
+            return self::FAILURE;
         }
+
+        $configPath = $this->laravel->configPath('rabbitmq-messages.php');
+        $force = (bool) $this->option('force');
+
+        if ($files->exists($configPath) && ! $force) {
+            $force = $this->confirm('config/rabbitmq-messages.php already exists. Overwrite it (and the worker scripts)?', false);
+        }
+
+        $this->call('vendor:publish', ['--tag' => 'rabbitmq-messages-migrations']);
+        $this->call('vendor:publish', ['--tag' => 'rabbitmq-messages-config', '--force' => $force]);
+        $this->call('vendor:publish', ['--tag' => 'rabbitmq-messages-bin', '--force' => $force]);
+
+        if ($force || ! $this->wasCustomized($files, $configPath)) {
+            $this->keepConnections($files, $configPath, $connections);
+        }
+
+        $this->suggestEnvironment($connections);
+
+        $this->components->info('Next steps: php artisan migrate && php artisan rabbitmq-messages:setup');
+
+        return self::SUCCESS;
     }
 
     /**
-     * Removes unwanted queue connection configuration lines from the `queue.php` file.
-     *
-     * This method modifies the `queue.php` configuration file by removing lines
-     * corresponding to the specified queue connection type. If the connection type
-     * is 'all', no changes are made.
-     *
-     * @param string $connection
+     * Remove the connection blocks that were not selected from the published config.
      */
-    protected function cleanUpUnwantedConnections(string $connection): void
+    protected function keepConnections(Filesystem $files, string $configPath, string $connections): void
     {
-        if($connection === 'all'){
+        if ($connections === 'all' || ! $files->exists($configPath)) {
             return;
         }
-        //remove unwanted lines from queue.php
-        $queueConfigRanges = [
-            'fanout' => [125, 170],
-            'topic' => [78, 124],
-        ];
-        $configFile = config_path('queue.php');
-        $range = $queueConfigRanges[$connection];
-        $lines = file($configFile);
-        $offset = $range[0] - 1;
-        $length = ($range[1] - $range[0]) + 1;
-        array_splice($lines, $offset, $length);
-        file_put_contents($configFile, implode('', $lines));
-        //comment unwanted commands from listen-message.sh
-        $listenMessageFile = base_path('etc/bin/listen-messages.sh');
-        $lines = file($listenMessageFile);
-        $bashCommandLines = [
-            'fanout' => [25, 28],
-            'topic' => [24, 27],
-        ];
-        $linesToComments = $bashCommandLines[$connection];
-        foreach ($linesToComments as $line){
-            $lines[$line - 1] = '#'.$lines[$line - 1];
+
+        $contents = $files->get($configPath);
+        foreach (static::CONNECTION_BLOCKS as $block) {
+            if ($block === $connections) {
+                continue;
+            }
+
+            $contents = preg_replace("#[ \t]*// <$block>.*?// </$block>\R#s", '', $contents);
         }
-        file_put_contents($listenMessageFile, implode('', $lines));
+
+        if ($connections === 'topic') {
+            $contents = str_replace(
+                "env('RABBITMQ_MESSAGES_CONNECTION', 'rabbitmq')",
+                "env('RABBITMQ_MESSAGES_CONNECTION', 'rabbitmq_topic')",
+                $contents
+            );
+        }
+
+        $files->put($configPath, $contents);
     }
 
-    protected function suggestEnvironments(string $connection): void
+    /**
+     * A config that still has both blocks has not been trimmed yet.
+     */
+    protected function wasCustomized(Filesystem $files, string $configPath): bool
     {
-        $path =  __DIR__ . '/../../.env.example';
-        //the file functions returns and array so the first line has index 0
-        $fromLine = 18;
-        $envLines = [
-            'fanout' => [32, 37],
-            'topic' => [26, 31],
-        ];
-        $lines = file($path);
-        $linesToRemove = data_get($envLines, $connection, []);
-        $suggestedLines = array_filter($lines,
-            fn($line) =>
-                $line >= $fromLine
-                && (
-                    empty($linesToRemove)
-                    || !($line >= $linesToRemove[0] && $line <= $linesToRemove[1])
-                ),
-            ARRAY_FILTER_USE_KEY
-        );
-        $suggestion = PHP_EOL . implode('', $suggestedLines) . PHP_EOL;
-        $this->info('Suggested environments to add to your .env and .env.example file: ' . $suggestion);
+        if (! $files->exists($configPath)) {
+            return false;
+        }
+
+        $contents = $files->get($configPath);
+
+        foreach (static::CONNECTION_BLOCKS as $block) {
+            if (! str_contains($contents, "// <$block>")) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    protected function suggestEnvironment(string $connections): void
+    {
+        $groups = $connections === 'all' ? ['common', 'fanout', 'topic'] : ['common', $connections];
+        $lines = [];
+
+        foreach ($groups as $group) {
+            foreach (static::ENVIRONMENT[$group] as $key => $value) {
+                $lines[] = "$key=$value";
+            }
+        }
+
+        $this->components->info('Suggested variables for your .env / .env.example:');
+        $this->line(implode(PHP_EOL, $lines).PHP_EOL);
     }
 }

@@ -2,7 +2,6 @@
 
 namespace SlothDevGuy\RabbitMQMessages\Pipes\Resiliency;
 
-use Closure;
 use Illuminate\Support\Facades\DB;
 use SlothDevGuy\RabbitMQMessages\Interfaces\MessageHandlerInterface;
 use SlothDevGuy\RabbitMQMessages\Models\ListenMessageModel;
@@ -12,14 +11,9 @@ class DispatchMessage
 {
     public function __construct(
         protected MessageHandlerInterface $handler,
-    )
-    {
-
-    }
+    ) {}
 
     /**
-     * @param ListenMessageModel $message
-     * @return void
      * @throws Throwable
      */
     public function handle(ListenMessageModel $message): void

@@ -10,9 +10,6 @@ use SlothDevGuy\RabbitMQMessages\Services\MessageResilient;
 class MessageExhausted
 {
     /**
-     * @param ListenMessageModel $message
-     * @param Closure $next
-     * @return mixed
      * @throws MessageRetriesExhaustedException
      */
     public function handle(ListenMessageModel $message, Closure $next): mixed
@@ -23,8 +20,6 @@ class MessageExhausted
     }
 
     /**
-     * @param ListenMessageModel $message
-     * @return void
      * @throws MessageRetriesExhaustedException
      */
     public function failIfMessageTriesExhausted(ListenMessageModel $message): void
@@ -32,7 +27,7 @@ class MessageExhausted
         $tries = data_get($message->properties, MessageResilient::getTriesKey(), 0);
         $maxTries = MessageResilient::getMaxTries();
 
-        if($maxTries && $tries >= $maxTries){
+        if ($maxTries && $tries >= $maxTries) {
             $message = "Message retries exhausted, retries[$tries] >= max-retries[$maxTries]";
             throw new MessageRetriesExhaustedException($message);
         }

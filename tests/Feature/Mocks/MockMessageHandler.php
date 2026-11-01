@@ -8,13 +8,12 @@ use SlothDevGuy\RabbitMQMessages\Models\ListenMessageModel;
 
 class MockMessageHandler implements MessageHandlerInterface
 {
-    /**
-     * @param Collection $payload
-     * @param ListenMessageModel $message
-     * @return void
-     */
+    public static int $handled = 0;
+
     public function handle(Collection $payload, ListenMessageModel $message): void
     {
+        static::$handled++;
+
         logger()->info('message handle', [
             'name' => $message->name,
             'uuid' => $message->uuid,

@@ -3,8 +3,10 @@
 namespace SlothDevGuy\RabbitMQMessages\Builders;
 
 use Closure;
+use Illuminate\Container\Container;
 use Illuminate\Contracts\Container\BindingResolutionException;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Str;
 use SlothDevGuy\RabbitMQMessages\Exceptions\MessageWithoutHandlerException;
 use SlothDevGuy\RabbitMQMessages\Interfaces\MessageHandlerInterface;
@@ -15,9 +17,6 @@ class FromListenMessage
     protected MessageHandlerInterface $handler;
 
     /**
-     * @param ListenMessageModel $message
-     * @param Closure $next
-     * @return mixed
      * @throws MessageWithoutHandlerException
      * @throws BindingResolutionException
      */
@@ -29,30 +28,26 @@ class FromListenMessage
     }
 
     /**
-     * @param ListenMessageModel $message
-     * @return MessageHandlerInterface
      * @throws BindingResolutionException
      * @throws MessageWithoutHandlerException
      */
     public function buildMessageHandler(ListenMessageModel $message): MessageHandlerInterface
     {
-        $handlers = config('rabbitmq-messages.message_handlers');
-        $handler = @$handlers[$message->name] ?? Arr::first(array_filter(
+        $handlers = (array) Config::get('rabbitmq-messages.message_handlers', []);
+        $name = (string) $message->name;
+        $handler = $handlers[$name] ?? Arr::first(array_filter(
             $handlers,
-            fn($key) => Str::startsWith($key, '/'),
+            fn ($key) => Str::startsWith((string) $key, '/'),
             ARRAY_FILTER_USE_KEY
-        ), fn($handler, $pattern) => preg_match($pattern, $message->name));
+        ), fn ($handler, $pattern) => (bool) preg_match($pattern, $name));
 
-        if(is_null($handler)){
+        if (is_null($handler)) {
             throw new MessageWithoutHandlerException("No handler for message: $message->name");
         }
 
-        return app()->make($handler);
+        return Container::getInstance()->make($handler);
     }
 
-    /**
-     * @return MessageHandlerInterface
-     */
     public function getHandler(): MessageHandlerInterface
     {
         return $this->handler;

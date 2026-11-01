@@ -5,16 +5,17 @@ namespace SlothDevGuy\RabbitMQMessagesTests\Unit;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Queue;
 use SlothDevGuy\RabbitMQMessages\DispatchMessage;
+use SlothDevGuy\RabbitMQMessages\Exceptions\InvalidConfigurationException;
 use SlothDevGuy\RabbitMQMessages\Jobs\DispatchMessagesJob;
 use SlothDevGuy\RabbitMQMessages\Models\DispatchMessageModel;
 use SlothDevGuy\RabbitMQMessages\Models\Enums\DispatchMessageStatusEnum;
 use SlothDevGuy\RabbitMQMessages\RabbitMQMessage;
-use SlothDevGuy\RabbitMQMessages\RabbitMQMessagesServiceProvider;
 use SlothDevGuy\RabbitMQMessages\Services\MessageDispatcher;
 use SlothDevGuy\RabbitMQMessagesTests\TestCase;
 
 /**
  * Class MessageDispatcherTest
+ *
  * @package SlothDevGuy\RabbitMQMessagesTests\Unit
  */
 class MessageDispatcherTest extends TestCase
@@ -23,7 +24,7 @@ class MessageDispatcherTest extends TestCase
     {
         Queue::fake();
         Config::set('rabbitmq-messages.models.dispatch_message', get_class($this->mockDispatchMessageModel()));
-        $dispatcher = new MessageDispatcher();
+        $dispatcher = new MessageDispatcher;
         $message = $dispatcher->dispatchMessage($name = 'foo-event', $payload = collect(['foo-key' => 'foo-value']));
         $this->assertNotNull($uuid = $message->uuid);
         $this->assertEquals($name, $message->name);
@@ -40,14 +41,37 @@ class MessageDispatcherTest extends TestCase
         $this->assertNull($message->payload->get('fired_at'));
 
         $this->assertEquals('rabbitmq', $message->metadata->get('connection'));
-        Queue::assertPushed(DispatchMessagesJob::class);
+        Queue::assertPushed(DispatchMessagesJob::class, function (DispatchMessagesJob $job) {
+            return $job->queue === 'rabbitmq-messages.dispatch-queue' && $job->afterCommit === true;
+        });
+    }
+
+    public function testDispatchUsesTheConfiguredOutboxQueue(): void
+    {
+        Queue::fake();
+        Config::set('rabbitmq-messages.models.dispatch_message', get_class($this->mockDispatchMessageModel()));
+        Config::set('rabbitmq-messages.outbox.queue_connection', 'redis');
+        Config::set('rabbitmq-messages.outbox.queue', 'outbox');
+
+        RabbitMQMessage::dispatchMessage('foo-event');
+
+        Queue::assertPushed(DispatchMessagesJob::class, function (DispatchMessagesJob $job) {
+            return $job->connection === 'redis' && $job->queue === 'outbox';
+        });
+    }
+
+    public function testUnknownConnectionFailsWithAClearMessage(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessage('connection [missing] is not defined');
+
+        new DispatchMessage('foo-event', collect(), 'missing');
     }
 
     public function testDispatchMessageFacade(): void
     {
         Queue::fake();
         Config::set('rabbitmq-messages.models.dispatch_message', get_class($this->mockDispatchMessageModel()));
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
 
         $message = RabbitMQMessage::dispatchMessage($name = 'foo-event', collect(['foo-key' => 'foo-value']));
         $this->assertNotNull($message->uuid);
@@ -61,8 +85,7 @@ class MessageDispatcherTest extends TestCase
         Queue::fake();
         $connection = 'test-connection';
         Config::set('rabbitmq-messages.models.dispatch_message', get_class($this->mockDispatchMessageModel()));
-        Config::set("queue.connections.$connection", config('queue.connections.rabbitmq'));
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
+        Config::set("rabbitmq-messages.connections.$connection", config('rabbitmq-messages.connections.rabbitmq'));
 
         $mockMessage = $this->mockDispatchMessage([], $connection);
         $message = RabbitMQMessage::dispatchMessage($mockMessage);
@@ -80,19 +103,12 @@ class MessageDispatcherTest extends TestCase
      */
     protected function mockDispatchMessageModel(): DispatchMessageModel
     {
-        return new class extends DispatchMessageModel {
-            public function save(array $options = [])
-            {
-
-            }
+        return new class extends DispatchMessageModel
+        {
+            public function save(array $options = []) {}
         };
     }
 
-    /**
-     * @param array $payload
-     * @param string $connection
-     * @return DispatchMessage
-     */
     protected function mockDispatchMessage(array $payload, string $connection): DispatchMessage
     {
         return new class($payload, $connection) extends DispatchMessage

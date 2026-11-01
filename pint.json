@@ -1,0 +1,7 @@
+{
+    "preset": "laravel",
+    "rules": {
+        "php_unit_method_casing": false,
+        "phpdoc_no_package": false
+    }
+}

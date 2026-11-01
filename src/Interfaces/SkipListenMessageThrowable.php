@@ -4,7 +4,4 @@ namespace SlothDevGuy\RabbitMQMessages\Interfaces;
 
 use Throwable;
 
-interface SkipListenMessageThrowable extends Throwable
-{
-
-}
+interface SkipListenMessageThrowable extends Throwable {}

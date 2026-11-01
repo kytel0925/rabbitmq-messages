@@ -2,7 +2,9 @@
 
 namespace SlothDevGuy\RabbitMQMessages\Pipes\Resiliency;
 
-use PhpAmqpLib\Message\AMQPMessage;
+use Illuminate\Container\Container;
+use Illuminate\Support\Facades\Log;
+use SlothDevGuy\RabbitMQMessages\Interfaces\IncomingMessageInterface;
 use SlothDevGuy\RabbitMQMessages\Models\ListenMessageModel;
 use SlothDevGuy\RabbitMQMessages\Pipes\StoreMessage;
 use SlothDevGuy\RabbitMQMessages\RabbitMQMessage;
@@ -10,46 +12,37 @@ use Throwable;
 
 class DeadLetterMessage
 {
-    /**
-     * @param ListenMessageModel $listenedMessage
-     * @param AMQPMessage $message
-     * @param string $connection
-     * @param Throwable $ex
-     */
     public function __construct(
         protected ListenMessageModel $listenedMessage,
-        protected AMQPMessage $message,
+        protected IncomingMessageInterface $message,
         protected string $connection,
         protected Throwable $ex
-    )
-    {
-
-    }
+    ) {}
 
     /**
-     * @return void
      * @throws Throwable
      */
     public function handle(): void
     {
         $this->listenedMessage->getConnection()->transaction(function () {
-            logger()->error('MessageListener::deadLetterMessage', [
+            Log::error('MessageListener::deadLetterMessage', [
                 'reason' => class_basename($this->ex),
                 'message' => $this->ex->getMessage(),
                 'properties' => $this->listenedMessage->properties->toArray(),
             ]);
 
-            if(!RabbitMQMessage::canDeadLetterMessages($this->connection)){
-                /** @var StoreMessage $storeMessage */
-                $storeMessage = app()->make(StoreMessage::class);
-                $storeMessage->storeMessage($this->listenedMessage);
+            if (! RabbitMQMessage::canDeadLetterMessages($this->connection)) {
+                if (! $this->listenedMessage->exists) {
+                    /** @var StoreMessage $storeMessage */
+                    $storeMessage = Container::getInstance()->make(StoreMessage::class);
+                    $storeMessage->storeMessage($this->listenedMessage);
+                }
 
-                $this->listenedMessage->setAsFailed();
+                $this->listenedMessage->setAsFailed($this->ex);
                 $this->listenedMessage->save();
-            }
-            else{
+            } else {
                 $this->listenedMessage->id && $this->listenedMessage->delete();
-                RabbitMQMessage::deadLetterMessage($this->listenedMessage);
+                RabbitMQMessage::deadLetterMessage($this->listenedMessage, $this->connection);
             }
 
             $this->message->reject(false);

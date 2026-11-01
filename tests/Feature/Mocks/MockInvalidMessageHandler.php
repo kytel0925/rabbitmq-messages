@@ -10,9 +10,6 @@ use SlothDevGuy\RabbitMQMessages\Models\ListenMessageModel;
 class MockInvalidMessageHandler implements MessageHandlerInterface
 {
     /**
-     * @param Collection $payload
-     * @param ListenMessageModel $message
-     * @return void
      * @throws NonRetriableMessageException
      */
     public function handle(Collection $payload, ListenMessageModel $message): void

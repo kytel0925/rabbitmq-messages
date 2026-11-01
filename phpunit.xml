@@ -3,11 +3,15 @@
          xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
          bootstrap="vendor/autoload.php"
          colors="true"
+         cacheDirectory=".phpunit.cache"
+         displayDetailsOnTestsThatTriggerDeprecations="true"
+         displayDetailsOnTestsThatTriggerWarnings="true"
 >
     <testsuites>
         <testsuite name="Unit">
             <directory>tests/Unit</directory>
         </testsuite>
+        <!-- requires a RabbitMQ broker (docker compose up -d rabbitmq); skipped when unreachable -->
         <testsuite name="Feature">
             <directory>tests/Feature</directory>
         </testsuite>
@@ -16,25 +20,16 @@
         <include>
             <directory suffix=".php">./src</directory>
         </include>
-        <exclude>
-            <directory suffix=".php">./bootstrap</directory>
-            <directory suffix=".php">./config</directory>
-            <directory suffix=".php">./database</directory>
-        </exclude>
     </source>
-    <coverage>
-    </coverage>
     <php>
-        <env name="APP_ENV" value="testing" />
-        <env name="APP_MAINTENANCE_DRIVER" value="file" />
-        <env name="BCRYPT_ROUNDS" value="4" />
-        <env name="CACHE_STORE" value="array" />
-        <env name="DB_CONNECTION" value="sqlite" />
-        <env name="DB_DATABASE" value=":memory:" />
-        <env name="QUEUE_CONNECTION" value="sync" />
-        <env name="MAIL_MAILER" value="array" />
-        <env name="PULSE_ENABLED" value="false" />
-        <env name="SESSION_DRIVER" value="array" />
-        <env name="TELESCOPE_ENABLED" value="false" />
+        <env name="APP_ENV" value="testing"/>
+        <env name="CACHE_STORE" value="array"/>
+        <env name="DB_CONNECTION" value="testing"/>
+        <env name="QUEUE_CONNECTION" value="sync"/>
+        <env name="RABBITMQ_HOST" value="127.0.0.1" force="false"/>
+        <env name="RABBITMQ_PORT" value="5672" force="false"/>
+        <env name="RABBITMQ_USERNAME" value="username" force="false"/>
+        <env name="RABBITMQ_PASSWORD" value="password" force="false"/>
+        <env name="RABBITMQ_VHOST" value="/" force="false"/>
     </php>
 </phpunit>
