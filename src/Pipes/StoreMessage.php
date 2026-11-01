@@ -9,9 +9,6 @@ use SlothDevGuy\RabbitMQMessages\Models\ListenMessageModel;
 class StoreMessage
 {
     /**
-     * @param ListenMessageModel $message
-     * @param Closure $next
-     * @return mixed
      * @throws MessageAlreadyRegisterException
      */
     public function handle(ListenMessageModel $message, Closure $next): mixed
@@ -22,8 +19,6 @@ class StoreMessage
     }
 
     /**
-     * @param ListenMessageModel $message
-     * @return ListenMessageModel
      * @throws MessageAlreadyRegisterException
      */
     public function storeMessage(ListenMessageModel $message): ListenMessageModel

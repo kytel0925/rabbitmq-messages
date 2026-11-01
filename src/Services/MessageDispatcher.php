@@ -2,7 +2,9 @@
 
 namespace SlothDevGuy\RabbitMQMessages\Services;
 
+use Illuminate\Container\Container;
 use Illuminate\Support\Enumerable;
+use Illuminate\Support\Facades\Config;
 use SlothDevGuy\RabbitMQMessages\DispatchMessage;
 use SlothDevGuy\RabbitMQMessages\Interfaces\MessageDispatcherInterface;
 use SlothDevGuy\RabbitMQMessages\Jobs\DispatchMessagesJob;
@@ -10,35 +12,31 @@ use SlothDevGuy\RabbitMQMessages\Models\DispatchMessageModel;
 use SlothDevGuy\RabbitMQMessages\Models\Enums\DispatchMessageStatusEnum;
 
 /**
- * Class MessagePublisher
- * @package SlothDevGuy\RabbitMQMessages\Services
+ * Dispatch side entry point (the transactional outbox):
+ *
+ *   1. the message is stored in dispatch_message (status "created"), inside the
+ *      caller's database transaction if there is one;
+ *   2. a DispatchMessagesJob is queued (after commit) on a regular Laravel queue;
+ *   3. the job publishes it to RabbitMQ and marks it "dispatched" (or "failed").
  */
 class MessageDispatcher implements MessageDispatcherInterface
 {
     protected DispatchMessageModel $dispatchMessage;
 
-    /**
-     * @param string|null $connection
-     */
     public function __construct(
-        protected string|null $connection = null,
-    )
-    {
-        $class = config('rabbitmq-messages.models.dispatch_message', DispatchMessageModel::class);
-        $this->dispatchMessage = app($class);
+        protected ?string $connection = null,
+    ) {
+        $class = Config::get('rabbitmq-messages.models.dispatch_message', DispatchMessageModel::class);
+        $this->dispatchMessage = Container::getInstance()->make($class);
     }
 
     /**
-     * @inheritdoc
-     * @param DispatchMessage|string $message
-     * @param Enumerable|null $payload
-     * @param string|null $connection
-     * @return DispatchMessageModel
+     * {@inheritdoc}
      */
-    public function dispatchMessage(DispatchMessage|string $message, Enumerable $payload = null, string $connection = null): DispatchMessageModel
+    public function dispatchMessage(DispatchMessage|string $message, ?Enumerable $payload = null, ?string $connection = null): DispatchMessageModel
     {
-        if(is_string($message)){
-            $message = new DispatchMessage($message, $payload, $connection? : $this->connection);
+        if (is_string($message)) {
+            $message = new DispatchMessage($message, $payload, $connection ?: $this->connection);
         }
 
         /** @var DispatchMessageModel $dispatchMessage */

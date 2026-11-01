@@ -7,11 +7,13 @@ use Illuminate\Database\Eloquent\Casts\AsCollection;
 use Illuminate\Database\Eloquent\Concerns\HasTimestamps;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Config;
 use SlothDevGuy\RabbitMQMessages\Models\Enums\ListenMessageStatusEnum;
 use Throwable;
 
 /**
  * Class ListenEvent
+ *
  * @package App\Models
  *
  * @property int id
@@ -40,28 +42,27 @@ class ListenMessageModel extends Model
     ];
 
     /**
-     * @inheritdoc
-     * @param array $attributes
+     * {@inheritdoc}
      */
     public function __construct(array $attributes = [])
     {
         parent::__construct($attributes);
 
-        $this->connection = config('rabbitmq-messages.database_connection');
+        $this->connection = Config::get('rabbitmq-messages.database_connection');
     }
 
-    public function setAsQueued(Carbon $queuedAt = null): void
+    public function setAsQueued(?Carbon $queuedAt = null): void
     {
-        $queuedAt = $queuedAt ?? now();
+        $queuedAt = $queuedAt ?? Carbon::now();
         $this->status = ListenMessageStatusEnum::QUEUED;
         $this->metadata = $this->metadata->merge([
             'queued_at' => $queuedAt->toIso8601String(),
         ]);
     }
 
-    public function setAsProcessed(Carbon $processedAt = null): void
+    public function setAsProcessed(?Carbon $processedAt = null): void
     {
-        $processedAt = $processedAt ?? now();
+        $processedAt = $processedAt ?? Carbon::now();
 
         $this->status = ListenMessageStatusEnum::PROCESSED;
         $this->metadata = $this->metadata->merge([
@@ -69,9 +70,9 @@ class ListenMessageModel extends Model
         ]);
     }
 
-    public function setAsFailed(Throwable $reason = null, Carbon $failedAt = null): void
+    public function setAsFailed(?Throwable $reason = null, ?Carbon $failedAt = null): void
     {
-        $failedAt = $failedAt ?? now();
+        $failedAt = $failedAt ?? Carbon::now();
         $exceptions = $this->metadata->get('exceptions', []);
         $exceptions[] = [
             'message' => $reason?->getMessage(),
@@ -84,11 +85,9 @@ class ListenMessageModel extends Model
     }
 
     /**
-     * @param string $uuid
-     * @return static|null
      * @noinspection PhpIncompatibleReturnTypeInspection
      */
-    public static function findByUuid(string $uuid): static|null
+    public static function findByUuid(string $uuid): ?static
     {
         return static::query()->where('uuid', $uuid)->first();
     }

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
+#
+# Publishes the outbox: runs the DispatchMessagesJob jobs queued by
+# RabbitMQMessage::dispatchMessage() on a regular Laravel queue connection
+# (QUEUE_CONNECTION or RABBITMQ_MESSAGES_OUTBOX_CONNECTION).
 
-cd /app || exit
+cd "${APP_PATH:-/app}" || exit 1
 
 if test -f .env; then
     set -o allexport
@@ -9,29 +13,32 @@ if test -f .env; then
     echo "environment variables loaded"
 fi
 
-QUEUE_NAME=${QUEUE_NAME:-"rabbitmq-messages.dispatch-queue"}
+OUTBOX_CONNECTION="${RABBITMQ_MESSAGES_OUTBOX_CONNECTION:-${QUEUE_CONNECTION:-database}}"
+QUEUE_NAME="${RABBITMQ_MESSAGES_OUTBOX_QUEUE:-rabbitmq-messages.dispatch-queue}"
 MAX_JOBS="${MAX_JOBS:-10000}"
 MAX_MEMORY="${MAX_MEMORY:-128}"
 JOB_TIMEOUT="${JOB_TIMEOUT:-300}"
 TIMEOUT="${TIMEOUT:-600}"
 JOB_RETRIES="${JOB_RETRIES:-3}"
+JOB_BACKOFF="${JOB_BACKOFF:-10}"
 DAEMON_SLEEP="${DAEMON_SLEEP:-30}"
 
-echo "Processing jobs from the [${QUEUE_NAME}] queue"
+echo "Processing jobs from the [${OUTBOX_CONNECTION}:${QUEUE_NAME}] queue"
 
 set -e
 while true; do
-    #for resending the publish of failed messages
-    #php artisan queue:retry --queue "${QUEUE_NAME}"
-    (timeout --preserve-status --foreground "${TIMEOUT}" php artisan queue:work \
+    # failed publishes end up in failed_jobs; re-publish them with:
+    #   php artisan queue:retry --queue "${QUEUE_NAME}"
+    (timeout --preserve-status --foreground "${TIMEOUT}" php artisan queue:work "${OUTBOX_CONNECTION}" \
         --queue "${QUEUE_NAME}" \
         --max-jobs "${MAX_JOBS}" \
         --memory "${MAX_MEMORY}" \
         --timeout "${JOB_TIMEOUT}" \
         --tries "${JOB_RETRIES}" \
+        --backoff "${JOB_BACKOFF}" \
         --json
     ) || {
-        echo "unexcepted error exit the daemon"
+        echo "unexpected error exit the daemon"
         exit 1
     }
 

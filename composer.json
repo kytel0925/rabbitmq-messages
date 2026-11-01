@@ -1,56 +1,80 @@
 {
-    "name" : "sloth-dev-guy/rabbitmq-messages",
-    "description" : "Send messages with resilience and idempotence between different applications using RabbitMQ",
-    "keywords" : [
+    "name": "sloth-dev-guy/rabbitmq-messages",
+    "description": "Idempotent and resilient domain events between bounded contexts for Laravel, transported over RabbitMQ (AMQP 0-9-1).",
+    "type": "library",
+    "keywords": [
         "sloth-dev-guy",
-        "Laravel",
-        "RabbitMQ"
+        "laravel",
+        "rabbitmq",
+        "amqp",
+        "domain-events",
+        "outbox",
+        "inbox",
+        "idempotency",
+        "resiliency"
     ],
-    "homepage" : "https://github.com/sloth-dev-guy/rabbitmq-messages",
-    "license" : "MIT",
-    "authors" : [
+    "homepage": "https://github.com/sloth-dev-guy/rabbitmq-messages",
+    "license": "MIT",
+    "authors": [
         {
             "name": "Telmo Rafael",
             "email": "sloth.dev.guy@gmail.com",
             "homepage": "https://sloth-guy.dev"
         }
     ],
-    "require" : {
-        "php": "^8.1",
-        "illuminate/support": "^10.0|^11.0|^12.0|^13.0",
-        "illuminate/container": "^10.0|^11.0|^12.0|^13.0",
-        "vladimir-yuldashev/laravel-queue-rabbitmq": "^15.0"
+    "require": {
+        "php": "^8.2",
+        "ext-json": "*",
+        "ext-sockets": "*",
+        "illuminate/bus": "^11.0|^12.0|^13.0",
+        "illuminate/console": "^11.0|^12.0|^13.0",
+        "illuminate/container": "^11.0|^12.0|^13.0",
+        "illuminate/contracts": "^11.0|^12.0|^13.0",
+        "illuminate/database": "^11.0|^12.0|^13.0",
+        "illuminate/events": "^11.0|^12.0|^13.0",
+        "illuminate/pipeline": "^11.0|^12.0|^13.0",
+        "illuminate/queue": "^11.0|^12.0|^13.0",
+        "illuminate/support": "^11.0|^12.0|^13.0",
+        "illuminate/validation": "^11.0|^12.0|^13.0",
+        "php-amqplib/php-amqplib": "^3.7",
+        "ramsey/uuid": "^4.7"
     },
-    "require-dev" : {
-        "fakerphp/faker": "^1.23",
-        "laravel/framework": "^10.0|^11.0|^12.0|^13.0",
-        "laravel/pail": "^1.2.2",
-        "laravel/pint": "^1.24",
-        "laravel/sail": "^1.41",
-        "mockery/mockery": "^1.6",
-        "nunomaduro/collision": "^8.6",
-        "phpunit/phpunit": "^11.0"
+    "require-dev": {
+        "laravel/pint": "^1.18",
+        "mockery/mockery": "^1.6.10",
+        "orchestra/testbench": "^9.0|^10.0|^11.0",
+        "phpunit/phpunit": "^10.5|^11.5|^12.5"
     },
-    "autoload" : {
-        "files": [
-            "src/helpers.php"
-        ],
-        "psr-4" : {
-            "SlothDevGuy\\RabbitMQMessages\\" : "src/"
+    "autoload": {
+        "psr-4": {
+            "SlothDevGuy\\RabbitMQMessages\\": "src/"
         }
     },
-    "autoload-dev" : {
-        "psr-4" : {
-            "SlothDevGuy\\RabbitMQMessagesTests\\" : "tests/"
+    "autoload-dev": {
+        "psr-4": {
+            "SlothDevGuy\\RabbitMQMessagesTests\\": "tests/"
         }
     },
-    "extra" : {
-        "laravel" : {
-            "providers" : [
+    "scripts": {
+        "test": "phpunit",
+        "test:unit": "phpunit --testsuite Unit",
+        "test:feature": "phpunit --testsuite Feature",
+        "lint": "pint --test",
+        "format": "pint"
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
                 "SlothDevGuy\\RabbitMQMessages\\RabbitMQMessagesServiceProvider"
-            ]
+            ],
+            "aliases": {
+                "RabbitMQMessage": "SlothDevGuy\\RabbitMQMessages\\RabbitMQMessage"
+            }
         }
     },
-    "minimum-stability" : "dev",
-    "prefer-stable" : true
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
 }

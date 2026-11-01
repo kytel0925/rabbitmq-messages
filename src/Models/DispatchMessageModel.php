@@ -6,13 +6,14 @@ use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Casts\AsCollection;
 use Illuminate\Database\Eloquent\Concerns\HasTimestamps;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Config;
 use SlothDevGuy\RabbitMQMessages\Models\Enums\DispatchMessageStatusEnum;
 use Throwable;
 
 /**
  * Class DispatchEvent
+ *
  * @package App\Models
  *
  * @property int id
@@ -41,25 +42,23 @@ class DispatchMessageModel extends Model
     ];
 
     /**
-     * @inheritdoc
-     * @param array $attributes
+     * {@inheritdoc}
      */
     public function __construct(array $attributes = [])
     {
         parent::__construct($attributes);
 
-        $this->connection = config('rabbitmq-messages.database_connection');
+        $this->connection = Config::get('rabbitmq-messages.database_connection');
     }
 
     /**
      * Sets the dispatched date of the event.
      *
-     * @param Carbon|null $dispatchedAt The dispatched date.
-     * @return void
+     * @param  Carbon|null  $dispatchedAt  The dispatched date.
      */
-    public function setDispatchedAt(Carbon $dispatchedAt = null): void
+    public function setDispatchedAt(?Carbon $dispatchedAt = null): void
     {
-        $dispatchedAt = $dispatchedAt ?? now();
+        $dispatchedAt = $dispatchedAt ?? Carbon::now();
 
         $this->properties = $this->properties->merge([
             'timestamp' => $dispatchedAt->getTimestamp(),
@@ -72,14 +71,9 @@ class DispatchMessageModel extends Model
         $this->status = DispatchMessageStatusEnum::DISPATCHED;
     }
 
-    /**
-     * @param Throwable|null $reason
-     * @param Carbon|null $failedAt
-     * @return void
-     */
-    public function setFailedAt(Throwable $reason = null, Carbon $failedAt = null): void
+    public function setFailedAt(?Throwable $reason = null, ?Carbon $failedAt = null): void
     {
-        $failedAt = $failedAt ?? now();
+        $failedAt = $failedAt ?? Carbon::now();
         $exceptions = $this->metadata->get('exceptions', []);
         $exceptions[] = [
             'message' => $reason?->getMessage(),
@@ -88,6 +82,6 @@ class DispatchMessageModel extends Model
         $this->metadata = $this->metadata->merge([
             'exceptions' => $exceptions,
         ]);
-        $this->status  = DispatchMessageStatusEnum::FAILED;
+        $this->status = DispatchMessageStatusEnum::FAILED;
     }
 }

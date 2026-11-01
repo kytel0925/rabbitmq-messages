@@ -2,162 +2,134 @@
 
 namespace SlothDevGuy\RabbitMQMessages\Services;
 
-use Illuminate\Support\Facades\Queue;
-use PhpAmqpLib\Exception\AMQPProtocolChannelException;
+use Illuminate\Support\Facades\Date;
+use Illuminate\Support\Facades\Log;
+use SlothDevGuy\RabbitMQMessages\Amqp\AmqpPublisher;
 use SlothDevGuy\RabbitMQMessages\Interfaces\MessageResilientInterface;
 use SlothDevGuy\RabbitMQMessages\Models\ListenMessageModel;
-use SlothDevGuy\RabbitMQMessages\RabbitMQQueue;
+use SlothDevGuy\RabbitMQMessages\Support\MessagesConfig;
 use Throwable;
 
 /**
- * Class MessageResilienceService
- * @package SlothDevGuy\SimpleRabbitMQ\Services
+ * Retry and dead letter strategies of the consume side.
  */
 class MessageResilient implements MessageResilientInterface
 {
-    /**
-     * @param string|null $connection
-     * @return bool
-     */
-    public function canRetry(string $connection = null): bool
-    {
-        $configurations = $this->getRetryConfiguration($connection ?? 'rabbitmq');
+    public const ORIGIN_EXCHANGE_HEADER = 'origin_exchange';
 
-        return static::getMaxTries()
-            && $configurations['retry_queue']
-            && $configurations['retry_exchange']
-            && $configurations['retry_exchange_type']
-            && $configurations['retry_exchange_routing_key'];
+    public const ORIGIN_ROUTING_KEY_HEADER = 'origin_routing_key';
+
+    public function __construct(
+        protected AmqpPublisher $publisher,
+    ) {}
+
+    public function canRetry(?string $connection = null): bool
+    {
+        $configuration = MessagesConfig::connection($connection);
+
+        return static::getMaxTries() > 0 && MessagesConfig::retryQueue($configuration) !== null;
     }
 
     /**
-     * @param ListenMessageModel $message
-     * @param Throwable $reason
-     * @param string|null $connection
-     * @return ListenMessageModel
-     * @throws AMQPProtocolChannelException
+     * @throws Throwable
      */
-    public function retry(ListenMessageModel $message, Throwable $reason, string $connection = null): ListenMessageModel
+    public function retry(ListenMessageModel $message, Throwable $reason, ?string $connection = null): ListenMessageModel
     {
         $connection = $connection ?? $message->metadata->get('connection');
-        if(!$this->canRetry($connection)){
+        if (! $this->canRetry($connection)) {
             return $message;
         }
 
-        $configurations = $this->getRetryConfiguration($connection);
-
-        /** @var RabbitMQQueue $rabbitmq */
-        $rabbitmq = Queue::connection($connection);
         $this->incrementRetry($message, $reason);
-        $rabbitmq->retryMessage($message, $configurations);
+        $this->publisher->retry($message, $connection);
 
-        logger()->info('message-retried', $message->properties->toArray());
+        Log::info('message-retried', $message->properties->toArray());
 
         return $message;
     }
 
-    /**
-     * @param string|null $connection
-     * @return bool
-     */
-    public function canDeadLetter(string $connection = null): bool
+    public function canDeadLetter(?string $connection = null): bool
     {
-        $configurations = $this->getDeadLetterConfiguration($connection ?? 'rabbitmq');
-
-        return
-            $configurations['dead_letter_queue']
-            && $configurations['dead_letter_exchange']
-            && $configurations['dead_letter_exchange_type']
-            && $configurations['dead_letter_exchange_routing_key'];
+        return MessagesConfig::deadLetterQueue(MessagesConfig::connection($connection)) !== null;
     }
 
     /**
-     * @param ListenMessageModel $message
-     * @param string|null $connection
-     * @return ListenMessageModel
-     * @throws AMQPProtocolChannelException
+     * @throws Throwable
      */
-    public function deadLetter(ListenMessageModel $message, string $connection = null): ListenMessageModel
+    public function deadLetter(ListenMessageModel $message, ?string $connection = null): ListenMessageModel
     {
         $connection = $connection ?? $message->metadata->get('connection');
-        if(!$this->canDeadLetter($connection)){
+        if (! $this->canDeadLetter($connection)) {
             return $message;
         }
 
-        $configurations = $this->getDeadLetterConfiguration($connection);
-        /** @var RabbitMQQueue $rabbitmq */
-        $rabbitmq = Queue::connection($connection);
-        $rabbitmq->deadLetterMessage($message, $configurations);
+        $this->publisher->deadLetter($message, $connection);
 
-        logger()->info('message-dead-letter', $message->toArray());
+        Log::info('message-dead-letter', $message->toArray());
 
         return $message;
     }
 
     /**
-     * @param string $connection
-     * @return array
+     * @return array{retry_queue: string|null, retry_queue_delay: int}
      */
     public function getRetryConfiguration(string $connection): array
     {
+        $configuration = MessagesConfig::connection($connection);
+
         return [
-            'retry_queue' => config("queue.connections.$connection.retry_queue"),
-            'retry_exchange' => config("queue.connections.$connection.retry_exchange"),
-            'retry_exchange_type' => config("queue.connections.$connection.retry_exchange_type"),
-            'retry_queue_delay' => config("queue.connections.$connection.retry_queue_delay"),
-            'retry_exchange_routing_key' => config("queue.connections.$connection.retry_exchange_routing_key"),
+            'retry_queue' => MessagesConfig::retryQueue($configuration),
+            'retry_queue_delay' => MessagesConfig::retryDelay($configuration),
         ];
     }
 
     /**
-     * @param string $connection
-     * @return array
+     * @return array{dead_letter_queue: string|null}
      */
     public function getDeadLetterConfiguration(string $connection): array
     {
         return [
-            'dead_letter_queue' => config("queue.connections.$connection.dead_letter_queue"),
-            'dead_letter_exchange' => config("queue.connections.$connection.dead_letter_exchange"),
-            'dead_letter_exchange_type' => config("queue.connections.$connection.dead_letter_exchange_type"),
-            'dead_letter_exchange_routing_key' => config("queue.connections.$connection.dead_letter_exchange_routing_key"),
+            'dead_letter_queue' => MessagesConfig::deadLetterQueue(MessagesConfig::connection($connection)),
         ];
     }
 
     /**
-     * @param ListenMessageModel $message
-     * @param Throwable $reason
-     * @return void
+     * Increment the tries header, append the failure reason and remember the
+     * original exchange/routing key (the retried copy travels through the
+     * default exchange).
      */
     protected function incrementRetry(ListenMessageModel $message, Throwable $reason): void
     {
         $properties = $message->properties->toArray();
         $key = static::getTriesKey();
         data_set($properties, $key, data_get($properties, $key, 0) + 1);
-        $exceptions = json_decode(data_get($properties, 'application_headers.exceptions', '[]'));
+
+        $exceptions = json_decode((string) data_get($properties, 'application_headers.exceptions', '[]'), true) ?: [];
         $exceptions[] = [
             'reason' => class_basename($reason),
             'message' => $reason->getMessage(),
             'file' => $reason->getFile(),
             'line' => $reason->getLine(),
-            'failed_at' => now()->toIso8601String(),
+            'failed_at' => Date::now()->toIso8601String(),
         ];
         data_set($properties, 'application_headers.exceptions', json_encode($exceptions));
+
+        foreach ([static::ORIGIN_EXCHANGE_HEADER => 'exchange', static::ORIGIN_ROUTING_KEY_HEADER => 'routing_key'] as $header => $metadata) {
+            if (! isset($properties['application_headers'][$header])) {
+                $properties['application_headers'][$header] = (string) $message->metadata->get($metadata, '');
+            }
+        }
+
         $message->properties = $properties;
     }
 
-    /**
-     * @return string
-     */
     public static function getTriesKey(): string
     {
         return 'application_headers.tries';
     }
 
-    /**
-     * @return int
-     */
     public static function getMaxTries(): int
     {
-        return config('rabbitmq-messages.max_tries');
+        return MessagesConfig::maxTries();
     }
 }

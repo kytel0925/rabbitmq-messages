@@ -2,66 +2,54 @@
 
 namespace SlothDevGuy\RabbitMQMessagesTests\Unit;
 
-use Carbon\Carbon;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Config;
-use Illuminate\Validation\ValidationException;
-use Mockery\MockInterface;
 use PhpAmqpLib\Message\AMQPMessage;
+use SlothDevGuy\RabbitMQMessages\Exceptions\InvalidRabbitMQMessageException;
 use SlothDevGuy\RabbitMQMessages\Exceptions\MessageAlreadyRegisterException;
-use SlothDevGuy\RabbitMQMessages\Exceptions\NonRetriableMessageException;
+use SlothDevGuy\RabbitMQMessages\Exceptions\MessageWithoutHandlerException;
 use SlothDevGuy\RabbitMQMessages\Models\Enums\ListenMessageStatusEnum;
 use SlothDevGuy\RabbitMQMessages\Models\ListenMessageModel;
 use SlothDevGuy\RabbitMQMessages\Pipes\MessageListener;
 use SlothDevGuy\RabbitMQMessages\RabbitMQMessage;
-use SlothDevGuy\RabbitMQMessages\RabbitMQMessagesServiceProvider;
+use SlothDevGuy\RabbitMQMessages\Services\MessageResilient;
+use SlothDevGuy\RabbitMQMessagesTests\Support\FakeIncomingMessage;
+use SlothDevGuy\RabbitMQMessagesTests\Support\MockMessageHandler;
 use SlothDevGuy\RabbitMQMessagesTests\TestCase;
 use Throwable;
 
 class MessageListenerTest extends TestCase
 {
     /**
-     * @return void
      * @throws Throwable
      */
     public function testListenMessage(): void
     {
-        MockMessageHandler::mockDBFacade();
-        $message = $this->mockRabbitMQMessage(
-            $properties = $this->validProperties(),
-            $this->validMessage($properties),
-        );
+        $message = $this->fakeMessage($properties = $this->validProperties());
 
         Config::set('rabbitmq-messages.message_handlers', [
             $properties['type'] => MockMessageHandler::class,
         ]);
 
-        $this->app->bind(ListenMessageModel::class, fn() => MockMessageHandler::mockListenMessageModel());
-        $registerMessage = new MessageListener();
-        $message = $registerMessage->sendMessageThroughPipes($message, 'foo-queue', 'foo-connection');
+        $this->app->bind(ListenMessageModel::class, fn () => MockMessageHandler::mockListenMessageModel());
+        $listened = (new MessageListener)->sendMessageThroughPipes($message, 'rabbitmq');
 
-        $this->assertEquals($properties['app_id'], $message->properties->get('app_id'));
-        $this->assertEquals($properties['message_id'], $message->uuid);
-        $this->assertEquals($properties['type'], $message->name);
-        $this->assertEquals(ListenMessageStatusEnum::PROCESSED, $message->status);
-
-        $this->assertNotNull($message->properties->get('app_id'));
-        $this->assertNotNull($message->properties->get('timestamp'));
+        $this->assertEquals($properties['app_id'], $listened->properties->get('app_id'));
+        $this->assertEquals($properties['message_id'], $listened->uuid);
+        $this->assertEquals($properties['type'], $listened->name);
+        $this->assertEquals(ListenMessageStatusEnum::PROCESSED, $listened->status);
+        $this->assertEquals(MockMessageHandler::class, $listened->metadata->get('handler'));
+        $this->assertNotNull($listened->properties->get('timestamp'));
+        $this->assertEquals('ack', $message->settlement());
     }
 
     /**
-     * @return void
      * @throws Throwable
-     * @noinspection PhpPossiblePolymorphicInvocationInspection
      */
     public function testMessageAlreadyRegisterException(): void
     {
-        $this->expectException(MessageAlreadyRegisterException::class);
-
-        $message = $this->mockRabbitMQMessage(
-            $properties = $this->validProperties(),
-            $this->validMessage($properties),
-        );
+        $message = $this->fakeMessage($properties = $this->validProperties());
 
         Config::set('rabbitmq-messages.message_handlers', [
             $properties['type'] => MockMessageHandler::class,
@@ -69,33 +57,72 @@ class MessageListenerTest extends TestCase
 
         $mock = MockMessageHandler::mockListenMessageModel();
         $mock::$findReturn = new $mock;
-        $this->app->bind(ListenMessageModel::class, fn() => $mock);
+        $this->app->bind(ListenMessageModel::class, fn () => $mock);
 
-        $registerMessage = new MessageListener();
-        $registerMessage->sendMessageThroughPipes($message, 'foo-queue', 'foo-connection');
+        try {
+            (new MessageListener)->sendMessageThroughPipes($message, 'rabbitmq');
+            $this->fail('A duplicated message must be skipped');
+        } catch (MessageAlreadyRegisterException) {
+            // a duplicated delivery is acknowledged and discarded (idempotency)
+            $this->assertEquals('ack', $message->settlement());
+        } finally {
+            $mock::$findReturn = null;
+        }
+    }
+
+    public function testMessageWithoutHandlerIsSkipped(): void
+    {
+        $message = $this->fakeMessage($this->validProperties());
+        Config::set('rabbitmq-messages.message_handlers', []);
+        $this->app->bind(ListenMessageModel::class, fn () => MockMessageHandler::mockListenMessageModel());
+
+        $this->expectException(MessageWithoutHandlerException::class);
+
+        try {
+            (new MessageListener)->sendMessageThroughPipes($message, 'rabbitmq');
+        } finally {
+            $this->assertEquals('ack', $message->settlement());
+        }
+    }
+
+    public function testInvalidMessageIsSkipped(): void
+    {
+        $properties = $this->validProperties();
+        unset($properties['message_id']);
+        $message = $this->fakeMessage($properties);
+        $this->app->bind(ListenMessageModel::class, fn () => MockMessageHandler::mockListenMessageModel());
+
+        $this->expectException(InvalidRabbitMQMessageException::class);
+
+        try {
+            (new MessageListener)->sendMessageThroughPipes($message, 'rabbitmq');
+        } finally {
+            $this->assertEquals('ack', $message->settlement());
+        }
+    }
+
+    public function testUndecodableBodyIsRejected(): void
+    {
+        $message = new FakeIncomingMessage($this->validProperties(), '{invalid json');
+
+        try {
+            (new MessageListener)->sendMessageThroughPipes($message, 'rabbitmq');
+            $this->fail('An undecodable body must be rejected');
+        } catch (\JsonException) {
+            $this->assertEquals(['reject', false], $message->settlements[0]);
+        }
     }
 
     /**
-     * @return void
      * @throws Throwable
-     * @noinspection PhpUndefinedVariableInspection
-     * @noinspection PhpFieldAssignmentTypeMismatchInspection
-     * @noinspection PhpPossiblePolymorphicInvocationInspection
      */
     public function testRetryMessageForSaveException(): void
     {
-        $this->expectException(QueryException::class);
-
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
         RabbitMQMessage::shouldReceive('canRetryMessages')
             ->once()
-            ->withArgs(fn(string $connection) => true)
             ->andReturn(true);
 
-        $message = $this->mockRabbitMQMessage(
-            $properties = $this->validProperties(),
-            $this->validMessage($properties),
-        );
+        $message = $this->fakeMessage($properties = $this->validProperties());
 
         Config::set('rabbitmq-messages.message_handlers', [
             $properties['type'] => MockMessageHandler::class,
@@ -104,100 +131,73 @@ class MessageListenerTest extends TestCase
         $listenMessage = MockMessageHandler::mockListenMessageModel();
         $listenMessage::$fails['save'] = true;
         $listenMessage::$findReturn = null;
-        $this->app->bind(ListenMessageModel::class, fn() => $listenMessage);
-        $registerMessage = new MessageListener();
+        $this->app->bind(ListenMessageModel::class, fn () => $listenMessage);
 
         RabbitMQMessage::shouldReceive('retryMessage')
             ->once()
-            ->withArgs(fn(ListenMessageModel $message, Throwable $reason) => true)
+            ->withArgs(fn (ListenMessageModel $message, Throwable $reason, string $connection) => $connection === 'rabbitmq')
             ->andReturn($listenMessage);
 
-        $registerMessage->sendMessageThroughPipes($message, 'foo-queue', 'foo-connection');
+        $this->expectException(QueryException::class);
+
+        try {
+            (new MessageListener)->sendMessageThroughPipes($message, 'rabbitmq');
+        } finally {
+            $this->assertEquals(['nack', false], $message->settlements[0]);
+        }
     }
 
     /**
-     * @return void
      * @throws Throwable
      */
     public function testRetryMessageForFindException(): void
     {
-        $this->expectException(QueryException::class);
-
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
         RabbitMQMessage::shouldReceive('canRetryMessages')
             ->once()
-            ->withArgs(fn(string $connection) => true)
             ->andReturn(true);
 
-        $message = $this->mockRabbitMQMessage(
-            $properties = $this->validProperties(),
-            $this->validMessage($properties),
-        );
+        $message = $this->fakeMessage($properties = $this->validProperties());
 
         Config::set('rabbitmq-messages.message_handlers', [
             $properties['type'] => MockMessageHandler::class,
         ]);
 
         $listenMessage = MockMessageHandler::mockListenMessageModel();
-        $this->app->bind(ListenMessageModel::class, fn() => $listenMessage);
-        $registerMessage = new MessageListener();
-        /** @noinspection PhpUndefinedVariableInspection */
-        /** @noinspection PhpFieldAssignmentTypeMismatchInspection */
-        /** @noinspection PhpPossiblePolymorphicInvocationInspection */
+        $this->app->bind(ListenMessageModel::class, fn () => $listenMessage);
         $listenMessage::$fails['find'] = true;
 
         RabbitMQMessage::shouldReceive('retryMessage')
             ->once()
-            ->withArgs(fn(ListenMessageModel $message, Throwable $reason) => true)
             ->andReturn($listenMessage);
 
-        $registerMessage->sendMessageThroughPipes($message, 'foo-queue', 'foo-connection');
+        $this->expectException(QueryException::class);
+
+        (new MessageListener)->sendMessageThroughPipes($message, 'rabbitmq');
     }
 
-    /**
-     * @param array $properties
-     * @param string $message
-     * @return AMQPMessage
-     * @noinspection PhpIncompatibleReturnTypeInspection
-     */
-    protected function mockRabbitMQMessage(array $properties, string $message): AMQPMessage
+    public function testRetriedMessageKeepsItsOriginalDestination(): void
     {
-        return $this->mock(AMQPMessage::class, function(MockInterface $mock) use ($properties, $message) {
-            $mock->expects('getRoutingKey')
-                ->zeroOrMoreTimes()
-                ->withNoArgs()
-                ->andReturn('');
+        $properties = $this->validProperties();
+        $properties['application_headers'] = [
+            'tries' => 1,
+            MessageResilient::ORIGIN_EXCHANGE_HEADER => 'amq.topic',
+            MessageResilient::ORIGIN_ROUTING_KEY_HEADER => 'rabbitmq-messages.tests',
+        ];
 
-            $mock->expects('getExchange')
-                ->zeroOrMoreTimes()
-                ->withNoArgs()
-                ->andReturn('fanout');
+        // retried copies are delivered through the default exchange
+        $message = $this->fakeMessage($properties, 'rabbitmq-messages.tests', '', 'rabbitmq-messages.tests');
+        Config::set('rabbitmq-messages.message_handlers', ['/.*/' => MockMessageHandler::class]);
+        $this->app->bind(ListenMessageModel::class, fn () => MockMessageHandler::mockListenMessageModel());
 
-            $mock->expects('getBodySize')
-                ->zeroOrMoreTimes()
-                ->withNoArgs()
-                ->andReturn(strlen($message));
+        $listened = (new MessageListener)->sendMessageThroughPipes($message, 'rabbitmq');
 
-            $mock->expects('get_properties')
-                ->zeroOrMoreTimes()
-                ->withNoArgs()
-                ->andReturnUsing(fn() => $properties);
+        $this->assertEquals('rabbitmq_topic', $listened->metadata->get('connection'));
+        $this->assertEquals('amq.topic', $listened->metadata->get('exchange'));
+    }
 
-            $mock->expects('getBody')
-                ->zeroOrMoreTimes()
-                ->withAnyArgs()
-                ->andReturn($message);
-
-            $mock->expects('ack')
-                ->zeroOrMoreTimes()
-                ->withNoArgs()
-                ->andReturn();
-
-            $mock->expects('nack')
-                ->zeroOrMoreTimes()
-                ->withNoArgs()
-                ->andReturn();
-        });
+    protected function fakeMessage(array $properties, string $queue = 'foo-queue', string $exchange = 'amq.fanout', string $routingKey = ''): FakeIncomingMessage
+    {
+        return new FakeIncomingMessage($properties, $this->validBody($properties), $queue, $exchange, $routingKey);
     }
 
     protected function validProperties(): array
@@ -212,11 +212,11 @@ class MessageListenerTest extends TestCase
         ];
     }
 
-    protected function validMessage(array $properties): string
+    protected function validBody(array $properties): string
     {
         return json_encode([
             'app_id' => $properties['app_id'],
-            'uuid' => $properties['message_id'],
+            'uuid' => $properties['message_id'] ?? null,
             'fired_at' => Carbon::createFromTimestamp($properties['timestamp'])->toIso8601String(),
         ]);
     }

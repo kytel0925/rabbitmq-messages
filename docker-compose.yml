@@ -8,6 +8,12 @@ services:
       - rabbitmq
     entrypoint: ''
     command: ['tail', '-f', '/dev/null']
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-username}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-password}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/}
 
   rabbitmq:
     image: rabbitmq:4-management-alpine
@@ -15,9 +21,9 @@ services:
       - '${RABBITMQ_PORT:-5672}:5672'
       - '${RABBITMQ_MANAGEMENT_PORT:-15672}:15672'
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
-      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-username}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-password}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
     volumes:
       - rabbitmq-data-volume:/var/lib/rabbitmq
       - rabbitmq-log-volume:/var/log/rabbitmq

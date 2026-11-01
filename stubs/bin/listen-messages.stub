@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
+#
+# Consumes domain events published by other bounded contexts.
+#
+# Runs `php artisan queue:work <connection>` against the rabbitmq-messages
+# driver. Retries, dead-lettering and idempotency are handled by the library,
+# so --tries/--backoff are intentionally not used.
 
-cd /app || exit
+cd "${APP_PATH:-/app}" || exit 1
 
 if test -f .env; then
     set -o allexport
@@ -10,35 +16,34 @@ if test -f .env; then
 fi
 
 CONNECTION="${CONNECTION:-rabbitmq}"
-RABBITMQ_EXCHANGE="${RABBITMQ_EXCHANGE:-amq.fanout}"
-RABBITMQ_EXCHANGE_TYPE="${RABBITMQ_EXCHANGE_TYPE:-fanout}"
-RABBITMQ_TOPIC_EXCHANGE="${RABBITMQ_TOPIC_EXCHANGE:-amq.topic}"
-RABBITMQ_TOPIC_EXCHANGE_TYPE="${RABBITMQ_TOPIC_EXCHANGE_TYPE:-topic}"
 QUEUE_NAME="${RABBITMQ_QUEUE:-default}"
 MAX_JOBS="${MAX_JOBS:-30000}"
 MAX_MEMORY="${MAX_MEMORY:-128}"
 JOB_TIMEOUT="${JOB_TIMEOUT:-300}"
 TIMEOUT="${TIMEOUT:-600}"
+SLEEP="${SLEEP:-1}"
 DAEMON_SLEEP="${DAEMON_SLEEP:-30}"
 
-php artisan rabbitmq:exchange-declare "$RABBITMQ_EXCHANGE" "$CONNECTION" --type "$RABBITMQ_EXCHANGE_TYPE"
-php artisan rabbitmq:exchange-declare "$RABBITMQ_TOPIC_EXCHANGE" "$CONNECTION" --type "$RABBITMQ_TOPIC_EXCHANGE_TYPE"
-php artisan rabbitmq:queue-declare "$QUEUE_NAME" "$CONNECTION"
-php artisan rabbitmq:queue-bind "$QUEUE_NAME" "$RABBITMQ_EXCHANGE" "$CONNECTION"
-php artisan rabbitmq:queue-bind "$QUEUE_NAME" "$RABBITMQ_TOPIC_EXCHANGE" "$CONNECTION" --routing-key "$RABBITMQ_TOPIC_ROUTING_KEY"
+# declare exchanges, the consumer queue, bindings, retry and dead letter queues
+# for every configured connection (idempotent)
+php artisan rabbitmq-messages:setup || {
+    echo "unable to set up the RabbitMQ topology"
+    exit 1
+}
 
-echo "Processing jobs from the [${QUEUE_NAME}] queue"
+echo "Processing messages from the [${QUEUE_NAME}] queue"
 
 set -e
 while true; do
-    (timeout --preserve-status --foreground "${TIMEOUT}" php artisan rabbitmq:consume "${CONNECTION}" \
+    (timeout --preserve-status --foreground "${TIMEOUT}" php artisan queue:work "${CONNECTION}" \
         --name "${QUEUE_NAME}" \
         --queue "${QUEUE_NAME}" \
         --max-jobs "${MAX_JOBS}" \
         --memory "${MAX_MEMORY}" \
-        --json \
-        --timeout "${JOB_TIMEOUT}") || {
-            echo "unexcepted error exit the daemon"
+        --sleep "${SLEEP}" \
+        --timeout "${JOB_TIMEOUT}" \
+        --json) || {
+            echo "unexpected error exit the daemon"
             exit 1
         }
 

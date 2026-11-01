@@ -3,60 +3,79 @@
 namespace SlothDevGuy\RabbitMQMessages\Jobs;
 
 use Illuminate\Bus\Queueable;
+use Illuminate\Container\Container;
+use Illuminate\Contracts\Bus\Dispatcher;
 use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Log;
+use SlothDevGuy\RabbitMQMessages\Amqp\AmqpPublisher;
 use SlothDevGuy\RabbitMQMessages\Models\DispatchMessageModel;
-use SlothDevGuy\RabbitMQMessages\RabbitMQQueue;
+use SlothDevGuy\RabbitMQMessages\Support\MessagesConfig;
 use Throwable;
 
 /**
- * Class DispatchEvents
- * @package SlothDevGuy\RabbitMQMessages\Jobs
+ * Publishes one outbox message (dispatch_message row) to RabbitMQ.
+ *
+ * Runs on a regular Laravel queue connection (database, redis, sqs ...).
+ * A failed publish marks the row as "failed" and re-throws so Laravel's
+ * worker applies --tries/--backoff and, finally, records it in failed_jobs
+ * (`php artisan queue:retry` re-publishes it).
+ *
+ * Delivery is at-least-once: if the row cannot be saved after a successful
+ * publish the job is retried and consumers discard the duplicate by uuid.
  */
 class DispatchMessagesJob implements ShouldQueue
 {
-    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+    use InteractsWithQueue, Queueable, SerializesModels;
 
-    /**
-     * Create a new job instance.
-     */
     public function __construct(
         protected DispatchMessageModel $dispatchEvent,
-    )
-    {
-        $this->queue = $this->dispatchEvent->metadata->get('queue', 'rabbitmq-messages.dispatch-queue');
+    ) {
+        if ($connection = MessagesConfig::outbox('queue_connection')) {
+            $this->onConnection($connection);
+        }
+
+        $this->onQueue(MessagesConfig::outbox('queue', 'rabbitmq-messages.dispatch-queue'));
+
+        if (MessagesConfig::outbox('after_commit', true)) {
+            $this->afterCommit();
+        }
     }
 
     /**
-     * Execute the job.
+     * Dispatch the job with the given arguments (kept for backward compatibility).
+     */
+    public static function dispatch(DispatchMessageModel $dispatchEvent): mixed
+    {
+        return Container::getInstance()->make(Dispatcher::class)->dispatch(new static($dispatchEvent));
+    }
+
+    /**
      * @throws Throwable
      */
-    public function handle(): void
+    public function handle(?AmqpPublisher $publisher = null): void
     {
+        $publisher ??= Container::getInstance()->make(AmqpPublisher::class);
+
         try {
-            DB::connection($this->dispatchEvent->getConnectionName())->transaction(function (){
-                $connection = $this->dispatchEvent->metadata->get('connection', 'rabbitmq');
-                /** @var RabbitMQQueue $rabbitmq */
-                $rabbitmq = Queue::connection($connection);
-                $rabbitmq->dispatchMessage($this->dispatchEvent);
+            $this->dispatchEvent->setDispatchedAt();
+            $publisher->publish($this->dispatchEvent);
+            $this->dispatchEvent->save();
 
-                logger()->info('event-published', $this->dispatchEvent->properties->toArray());
+            Log::info('event-published', $this->dispatchEvent->properties->toArray());
+        } catch (Throwable $e) {
+            Log::error("event-publish failed: {$e->getMessage()}", $this->dispatchEvent->properties->toArray());
 
-                $this->dispatchEvent->setDispatchedAt();
-                $this->dispatchEvent->save();
-            });
-        }
-        catch (Throwable $e) {
-            logger()->error("event-publish failed: {$e->getMessage()}", $this->dispatchEvent->properties->toArray());
-
-            $this->dispatchEvent->setFailedAt();
+            $this->dispatchEvent->setFailedAt($e);
             $this->dispatchEvent->save();
 
             throw $e;
         }
+    }
+
+    public function getDispatchMessage(): DispatchMessageModel
+    {
+        return $this->dispatchEvent;
     }
 }

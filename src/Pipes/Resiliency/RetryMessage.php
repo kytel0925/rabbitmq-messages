@@ -2,37 +2,28 @@
 
 namespace SlothDevGuy\RabbitMQMessages\Pipes\Resiliency;
 
-use PhpAmqpLib\Message\AMQPMessage;
+use Illuminate\Support\Facades\Log;
+use SlothDevGuy\RabbitMQMessages\Interfaces\IncomingMessageInterface;
 use SlothDevGuy\RabbitMQMessages\Models\ListenMessageModel;
 use SlothDevGuy\RabbitMQMessages\RabbitMQMessage;
 use Throwable;
 
 class RetryMessage
 {
-    /**
-     * @param ListenMessageModel $listenedMessage
-     * @param AMQPMessage $message
-     * @param string $connection
-     * @param Throwable $ex
-     */
     public function __construct(
         protected ListenMessageModel $listenedMessage,
-        protected AMQPMessage $message,
+        protected IncomingMessageInterface $message,
         protected string $connection,
         protected Throwable $ex
-    )
-    {
-
-    }
+    ) {}
 
     /**
-     * @return void
      * @throws Throwable
      */
     public function handle(): void
     {
-        $this->listenedMessage->getConnection()->transaction(function (){
-            logger()->warning('MessageListener::retryMessage', [
+        $this->listenedMessage->getConnection()->transaction(function () {
+            Log::warning('MessageListener::retryMessage', [
                 'reason' => class_basename($this->ex),
                 'message' => $this->ex->getMessage(),
                 'properties' => $this->listenedMessage->properties->toArray(),
@@ -43,7 +34,7 @@ class RetryMessage
 
             if (RabbitMQMessage::canRetryMessages($this->connection)) {
                 $this->listenedMessage->delete();
-                RabbitMQMessage::retryMessage($this->listenedMessage, $this->ex);
+                RabbitMQMessage::retryMessage($this->listenedMessage, $this->ex, $this->connection);
             }
 
             $this->message->nack();

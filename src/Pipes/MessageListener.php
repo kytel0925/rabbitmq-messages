@@ -2,11 +2,13 @@
 
 namespace SlothDevGuy\RabbitMQMessages\Pipes;
 
-use Illuminate\Support\Facades\Pipeline;
-use PhpAmqpLib\Message\AMQPMessage;
+use Illuminate\Container\Container;
+use Illuminate\Pipeline\Pipeline;
+use Illuminate\Support\Facades\Log;
 use SlothDevGuy\RabbitMQMessages\Builders\FromListenMessage;
 use SlothDevGuy\RabbitMQMessages\Builders\FromRabbitMQMessage;
 use SlothDevGuy\RabbitMQMessages\Exceptions\MessageRetriesExhaustedException;
+use SlothDevGuy\RabbitMQMessages\Interfaces\IncomingMessageInterface;
 use SlothDevGuy\RabbitMQMessages\Interfaces\NonRetriableMessageThrowable;
 use SlothDevGuy\RabbitMQMessages\Interfaces\SkipListenMessageThrowable;
 use SlothDevGuy\RabbitMQMessages\Models\ListenMessageModel;
@@ -15,43 +17,48 @@ use SlothDevGuy\RabbitMQMessages\Pipes\Resiliency\DispatchMessage;
 use SlothDevGuy\RabbitMQMessages\Pipes\Resiliency\RetryMessage;
 use Throwable;
 
+/**
+ * Consume side entry point (the inbox):
+ *
+ *   validate -> resolve handler -> idempotency check -> retries exhausted?
+ *   -> store (queued) -> handler (in a DB transaction) -> processed -> ack
+ *
+ * Failures are routed to skip (ack), retry (delayed retry queue) or dead letter.
+ */
 class MessageListener
 {
     /**
-     * @param AMQPMessage $message
-     * @param string $queue
-     * @param string $connection
-     * @return ListenMessageModel
-     * @throws Throwable
+     * @throws Throwable the reason the message was skipped, retried or dead-lettered
      */
-    public function sendMessageThroughPipes(AMQPMessage $message, string $queue, string $connection): ListenMessageModel
+    public function sendMessageThroughPipes(IncomingMessageInterface $message, string $connection): ListenMessageModel
     {
-        $fromRabbitMQMessage = new FromRabbitMQMessage($message, $queue, $connection);
-        $listenedMessage = $fromRabbitMQMessage->buildListenMessageModel(app(ListenMessageModel::class));
+        $container = Container::getInstance();
+        $fromRabbitMQMessage = new FromRabbitMQMessage($message, $connection);
+        $listenedMessage = $fromRabbitMQMessage->buildListenMessageModel($container->make(ListenMessageModel::class));
+        $connection = $fromRabbitMQMessage->getConnection();
 
         try {
-            /**
-             * @var FromListenMessage $fromListenMessage
-             * @var ListenMessageModel $listenedMessage
-             */
-            $listenedMessage = Pipeline::send($listenedMessage)
+            /** @var FromListenMessage $fromListenMessage */
+            $listenedMessage = (new Pipeline($container))
+                ->send($listenedMessage)
                 ->through([
-                    app()->make(MessageValidation::class),
-                    $fromListenMessage = app()->make(FromListenMessage::class),
-                    app()->make(VerifyMessageAlreadyRegister::class),
-                    app()->make(MessageExhausted::class),
-                    app()->make(StoreMessage::class),
+                    $container->make(MessageValidation::class),
+                    $fromListenMessage = $container->make(FromListenMessage::class),
+                    $container->make(VerifyMessageAlreadyRegister::class),
+                    $container->make(MessageExhausted::class),
+                    $container->make(StoreMessage::class),
                 ])
                 ->then(function (ListenMessageModel $listenedMessage) use ($fromListenMessage) {
                     $dispatchMessage = new DispatchMessage($fromListenMessage->getHandler());
                     $dispatchMessage->handle($listenedMessage);
+
                     return $listenedMessage;
                 });
 
             $message->ack();
 
             return $listenedMessage;
-        }catch (SkipListenMessageThrowable $ex) {
+        } catch (SkipListenMessageThrowable $ex) {
             $this->skipMessage($message, $ex);
             throw $ex;
         } catch (MessageRetriesExhaustedException|NonRetriableMessageThrowable $ex) {
@@ -65,15 +72,10 @@ class MessageListener
         }
     }
 
-    /**
-     * @param AMQPMessage $message
-     * @param Throwable $ex
-     * @return void
-     */
-    protected function skipMessage(AMQPMessage $message, Throwable $ex): void
+    protected function skipMessage(IncomingMessageInterface $message, Throwable $ex): void
     {
         $reason = class_basename($ex);
-        logger()->debug("message skipped $reason: {$ex->getMessage()}", $message->get_properties());
+        Log::debug("message skipped $reason: {$ex->getMessage()}", $message->getProperties());
         $message->ack();
     }
 }

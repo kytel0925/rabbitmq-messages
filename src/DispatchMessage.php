@@ -7,64 +7,53 @@ use Illuminate\Support\Enumerable;
 use PhpAmqpLib\Message\AMQPMessage;
 use Ramsey\Uuid\Uuid;
 use Ramsey\Uuid\UuidInterface;
+use SlothDevGuy\RabbitMQMessages\Support\MessagesConfig;
 
 /**
  * Class DispatchMessage
+ *
  * @package SlothDevGuy\RabbitMQMessages
  */
 class DispatchMessage
 {
     /**
      * The app_id that is sending this message
-     *
-     * @var string
      */
     protected string $appID;
 
     /**
      * The uuid for this message
-     *
-     * @var UuidInterface
      */
     protected UuidInterface $uuid;
 
     /**
      * The message properties and headers
-     *
-     * @var Collection
      */
     protected Collection $properties;
 
     /**
      * The message metadata to be stored
-     *
-     * @var Collection
      */
     protected Collection $metadata;
 
     /**
      * The message configurations
-     *
-     * @var array
      */
     protected array $configurations;
 
     /**
-     * @param string $name
-     * @param Enumerable|Collection $payload
-     * @param string|null $connection
+     * @param  Enumerable|Collection  $payload
      */
     public function __construct(
         protected string $name,
-        protected Enumerable|Collection $payload,
-        protected string|null $connection = null,
-    )
-    {
-        $this->connection = $this->connection ?? 'rabbitmq';
-        $this->configurations = config("queue.connections.{$this->connection}");
+        protected Enumerable|Collection|null $payload = null,
+        protected ?string $connection = null,
+    ) {
+        $this->connection = $this->connection ?: MessagesConfig::defaultConnection();
+        $this->configurations = MessagesConfig::connection($this->connection);
 
         $this->uuid = static::buildUuid();
-        $this->appID = $this->configurations['app_id'];
+        $this->appID = (string) ($this->configurations['app_id'] ?? MessagesConfig::appId());
 
         $this->buildProperties();
         $this->buildPayload();
@@ -73,8 +62,6 @@ class DispatchMessage
 
     /**
      * Generic getter
-     *
-     * @return string
      */
     public function getAppID(): string
     {
@@ -83,8 +70,6 @@ class DispatchMessage
 
     /**
      * Generic getter
-     *
-     * @return UuidInterface
      */
     public function getUuid(): UuidInterface
     {
@@ -93,8 +78,6 @@ class DispatchMessage
 
     /**
      * Generic getter
-     *
-     * @return string
      */
     public function getName(): string
     {
@@ -103,8 +86,6 @@ class DispatchMessage
 
     /**
      * Get the properties of the RabbitMQ message
-     *
-     * @return Collection
      */
     public function getProperties(): Collection
     {
@@ -113,8 +94,6 @@ class DispatchMessage
 
     /**
      * Get the payload of the RabbitMQ message
-     *
-     * @return Collection
      */
     public function getPayload(): Collection
     {
@@ -123,8 +102,6 @@ class DispatchMessage
 
     /**
      * Get the metadata of the message
-     *
-     * @return Collection
      */
     public function getMetadata(): Collection
     {
@@ -133,8 +110,6 @@ class DispatchMessage
 
     /**
      * Build properties for RabbitMQ message
-     *
-     * @return void
      */
     protected function buildProperties(): void
     {
@@ -145,15 +120,13 @@ class DispatchMessage
             'message_id' => $this->uuid->toString(),
             'content_type' => data_get($this->configurations, 'content_type', 'application/json'),
             'delivery_mode' => data_get($this->configurations, 'delivery_mode', AMQPMessage::DELIVERY_MODE_PERSISTENT),
-            //'priority' => null,
-            //'correlation_id' => null,
+            // 'priority' => null,
+            // 'correlation_id' => null,
         ]);
     }
 
     /**
      * Build the payload for the RabbitMQ message
-     *
-     * @return void
      */
     protected function buildPayload(): void
     {
@@ -169,23 +142,19 @@ class DispatchMessage
 
     /**
      * Build metadata for RabbitMQ message
-     *
-     * @return void
      */
     protected function buildMetadata(): void
     {
         $this->metadata = collect([
             'connection' => $this->connection,
-            'exchange' => data_get($this->configurations, 'options.queue.exchange', 'amq.fanout'),
-            'exchange_type' => data_get($this->configurations, 'options.queue.exchange_type', 'fanout'),
-            'routing_key' => data_get($this->configurations, 'options.queue.exchange_routing_key', ''),
+            'exchange' => (string) $this->configurations['exchange'],
+            'exchange_type' => (string) $this->configurations['exchange_type'],
+            'routing_key' => (string) $this->configurations['routing_key'],
         ]);
     }
 
     /**
      * Build a UUID using version 4
-     *
-     * @return UuidInterface
      */
     public static function buildUuid(): UuidInterface
     {

@@ -2,119 +2,98 @@
 
 namespace SlothDevGuy\RabbitMQMessagesTests\Feature;
 
-use Illuminate\Foundation\Testing\DatabaseMigrations;
-use Illuminate\Support\Collection;
-use Illuminate\Support\Enumerable;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Queue;
+use PhpAmqpLib\Wire\AMQPTable;
+use SlothDevGuy\RabbitMQMessages\Amqp\AmqpPublisher;
 use SlothDevGuy\RabbitMQMessages\DispatchMessage;
 use SlothDevGuy\RabbitMQMessages\Models\DispatchMessageModel;
 use SlothDevGuy\RabbitMQMessages\Models\Enums\ListenMessageStatusEnum;
 use SlothDevGuy\RabbitMQMessages\Models\ListenMessageModel;
 use SlothDevGuy\RabbitMQMessages\RabbitMQMessage;
-use SlothDevGuy\RabbitMQMessages\RabbitMQMessagesServiceProvider;
-use SlothDevGuy\RabbitMQMessages\RabbitMQQueue;
 use SlothDevGuy\RabbitMQMessages\Services\MessageResilient;
 use SlothDevGuy\RabbitMQMessagesTests\Feature\Mocks\MockFailedMessageHandler;
 use SlothDevGuy\RabbitMQMessagesTests\Feature\Mocks\MockInvalidMessageHandler;
 use SlothDevGuy\RabbitMQMessagesTests\Feature\Mocks\MockMessageHandler;
-use SlothDevGuy\RabbitMQMessagesTests\TestCase;
-use function Termwind\parse;
 
-class ListenMessageTest extends TestCase
+class ListenMessageTest extends FeatureTestCase
 {
-    use DatabaseMigrations;
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        MockFailedMessageHandler::$failures = -1;
+        MockMessageHandler::$handled = 0;
+    }
 
     public function testMessageListen(): void
     {
         $message = 'test-message-listen';
         Config::set("rabbitmq-messages.message_handlers.$message", MockMessageHandler::class);
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
-        $configurations = $this->declareQueue();
 
-        $payload = collect(static::makeFakePayload());
-
-        $message = RabbitMQMessage::dispatchMessage($message, $payload)->fresh();
-        $this->assertConsume($configurations['queue']);
-        //there is a way to redeclare this class VladimirYuldashev\LaravelQueueRabbitMQ\Console\WorkCommand in order to fix this protected $signature = 'rabbitmq:consume
-        //maybe a good places sed that modify the file before anyone reads-it?
-
-        $this->assertDatabaseHas('listen_message', [
-            'uuid' => $message->uuid,
-        ]);
+        $message = RabbitMQMessage::dispatchMessage($message, collect(static::makeFakePayload()))->fresh();
+        $this->consumeOnce();
 
         $actualMessage = ListenMessageModel::findByUuid($message->uuid);
+        $this->assertNotNull($actualMessage);
         $this->assertEquals(ListenMessageStatusEnum::PROCESSED, $actualMessage->status);
         $this->assertEquals($message->name, $actualMessage->name);
-        $this->assertEquals($message->uuid, $actualMessage->uuid);
         $this->assertEquals($message->payload->toArray(), $actualMessage->payload->toArray());
-        $this->assertQueueIsEmpty($configurations['queue']);
+        $this->assertEquals('rabbitmq', $actualMessage->metadata->get('connection'));
+        $this->assertEquals(MockMessageHandler::class, $actualMessage->metadata->get('handler'));
+        $this->assertQueueIsEmpty($this->queue());
     }
 
     public function testMessageListenPattern(): void
     {
-        $message = 'test-message-listen';
-        Config::set("rabbitmq-messages.message_handlers", [
-            '/.*/' => MockMessageHandler::class
-        ]);
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
-        $configurations = $this->declareQueue();
+        Config::set('rabbitmq-messages.message_handlers', ['/.*/' => MockMessageHandler::class]);
 
-        $payload = collect(static::makeFakePayload());
+        $message = RabbitMQMessage::dispatchMessage('test-message-listen', collect(static::makeFakePayload()))->fresh();
+        $this->consumeOnce();
 
-        $message = RabbitMQMessage::dispatchMessage($message, $payload)->fresh();
-        $this->assertConsume($configurations['queue']);
+        $this->assertEquals(ListenMessageStatusEnum::PROCESSED, ListenMessageModel::findByUuid($message->uuid)->status);
+        $this->assertQueueIsEmpty($this->queue());
+    }
 
-        $this->assertDatabaseHas('listen_message', [
-            'uuid' => $message->uuid,
-        ]);
+    public function testDuplicatedMessageIsProcessedOnce(): void
+    {
+        Config::set('rabbitmq-messages.message_handlers', ['/.*/' => MockMessageHandler::class]);
+        MockMessageHandler::$handled = 0;
 
-        $actualMessage = ListenMessageModel::findByUuid($message->uuid);
-        $this->assertEquals(ListenMessageStatusEnum::PROCESSED, $actualMessage->status);
-        $this->assertEquals($message->name, $actualMessage->name);
-        $this->assertEquals($message->uuid, $actualMessage->uuid);
-        $this->assertEquals($message->payload->toArray(), $actualMessage->payload->toArray());
-        $this->assertQueueIsEmpty($configurations['queue']);
+        $message = RabbitMQMessage::dispatchMessage('test-message-listen', collect(static::makeFakePayload()));
+        // the outbox is at-least-once: publish the same row again
+        $this->app->make(AmqpPublisher::class)->publish($message->fresh());
+
+        $this->consumeOnce();
+        $this->consumeOnce();
+
+        $this->assertEquals(1, MockMessageHandler::$handled);
+        $this->assertDatabaseCount('listen_message', 1);
+        $this->assertQueueIsEmpty($this->queue());
     }
 
     public function testSkippedMessageListen(): void
     {
-        $message = 'test-message-listen';
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
-        $configurations = $this->declareQueue();
-
-        $payload = collect(static::makeFakePayload());
-
-        RabbitMQMessage::dispatchMessage($message, $payload)->fresh();
-        $this->assertConsume($configurations['queue']);
+        RabbitMQMessage::dispatchMessage('test-message-listen', collect(static::makeFakePayload()));
+        $this->consumeOnce();
 
         $this->assertDatabaseEmpty('listen_message');
-        $this->assertQueueIsEmpty($configurations['queue']);
+        $this->assertQueueIsEmpty($this->queue());
     }
 
     public function testFailedMessageListen(): void
     {
         $message = 'test-message-listen';
         Config::set("rabbitmq-messages.message_handlers.$message", MockFailedMessageHandler::class);
-        Config::set('queue.connections.rabbitmq.retry_queue', ''); //disable the retry function
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
-        $configurations = $this->declareQueue();
+        Config::set('rabbitmq-messages.connections.rabbitmq.retry.queue', ''); // disable retries
 
-        $payload = collect(static::makeFakePayload());
-
-        $message = RabbitMQMessage::dispatchMessage($message, $payload)->fresh();
-        $this->assertConsume($configurations['queue']);
-        $this->assertDatabaseHas('listen_message', [
-            'uuid' => $message->uuid,
-        ]);
+        $message = RabbitMQMessage::dispatchMessage($message, collect(static::makeFakePayload()))->fresh();
+        $this->consumeOnce();
 
         $actualMessage = ListenMessageModel::findByUuid($message->uuid);
         $this->assertEquals(ListenMessageStatusEnum::FAILED, $actualMessage->status);
-        $this->assertEquals($message->name, $actualMessage->name);
-        $this->assertEquals($message->uuid, $actualMessage->uuid);
-        $this->assertEquals($message->payload->toArray(), $actualMessage->payload->toArray());
         $this->assertNotEmpty($actualMessage->metadata->get('exceptions'));
-        $this->assertQueueIsEmpty($configurations['queue']);
+        $this->assertQueueIsEmpty($this->queue());
     }
 
     public function testNoRetries(): void
@@ -122,60 +101,60 @@ class ListenMessageTest extends TestCase
         $message = 'test-message-listen';
         Config::set("rabbitmq-messages.message_handlers.$message", MockFailedMessageHandler::class);
         Config::set('rabbitmq-messages.max_tries', 0);
-        Config::set('queue.connections.rabbitmq.retry_queue_delay', 1000);
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
-        $configurations = $this->declareQueue();
 
-        $payload = collect(static::makeFakePayload());
-        $message = RabbitMQMessage::dispatchMessage($message, $payload)->fresh();
-        $this->assertConsume($configurations['queue']);
-        $this->assertDatabaseHas('listen_message', [
-            'uuid' => $message->uuid,
-        ]);
+        $message = RabbitMQMessage::dispatchMessage($message, collect(static::makeFakePayload()))->fresh();
+        $this->consumeOnce();
 
         $actualMessage = ListenMessageModel::findByUuid($message->uuid);
         $this->assertEquals(ListenMessageStatusEnum::FAILED, $actualMessage->status);
-        $this->assertEquals($message->name, $actualMessage->name);
-        $this->assertEquals($message->uuid, $actualMessage->uuid);
-        $this->assertEquals($message->payload->toArray(), $actualMessage->payload->toArray());
         $this->assertNotEmpty($actualMessage->metadata->get('exceptions'));
-        $this->assertQueueIsEmpty($configurations['queue']);
+        $this->assertQueueIsEmpty($this->queue());
+        $this->assertQueueIsEmpty($this->retryQueue());
     }
-
 
     public function testRetryMessage(): void
     {
         $message = 'test-message-listen';
         Config::set("rabbitmq-messages.message_handlers.$message", MockFailedMessageHandler::class);
-        Config::set('queue.connections.rabbitmq.dead_letter_queue', ''); //disable the dead letter function
+        Config::set('rabbitmq-messages.connections.rabbitmq.dead_letter.queue', ''); // disable dead letter
         Config::set('rabbitmq-messages.max_tries', $maxRetries = 2);
-        Config::set('queue.connections.rabbitmq.retry_queue_delay', 1000);
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
-        $configurations = $this->declareQueue();
 
-        $payload = collect(static::makeFakePayload());
-        $message = RabbitMQMessage::dispatchMessage($message, $payload)->fresh();
+        $message = RabbitMQMessage::dispatchMessage($message, collect(static::makeFakePayload()))->fresh();
 
-        $sleep = ceil(config('queue.connections.rabbitmq.retry_queue_delay') / 1000);
         for ($i = 0; $i < $maxRetries; $i++) {
-            $this->assertConsume($configurations['queue']);
-            sleep($sleep);
+            $this->consumeOnce();
+            $this->assertQueueIsEmpty($this->queue());
+            $this->waitForRetry();
         }
 
-        $this->assertConsume($configurations['queue']);
-
-        $this->assertDatabaseHas('listen_message', [
-            'uuid' => $message->uuid,
-        ]);
+        $this->consumeOnce();
 
         $actualMessage = ListenMessageModel::findByUuid($message->uuid);
         $this->assertEquals(ListenMessageStatusEnum::FAILED, $actualMessage->status);
-        $this->assertEquals($message->name, $actualMessage->name);
-        $this->assertEquals($message->uuid, $actualMessage->uuid);
         $this->assertEquals($message->payload->toArray(), $actualMessage->payload->toArray());
         $this->assertNotEmpty($actualMessage->metadata->get('exceptions'));
         $this->assertEquals($maxRetries, data_get($actualMessage->properties, MessageResilient::getTriesKey()));
-        $this->assertQueueIsEmpty($configurations['queue']);
+        $this->assertEquals('amq.fanout', $actualMessage->metadata->get('exchange'));
+        $this->assertCount($maxRetries, json_decode(data_get($actualMessage->properties, 'application_headers.exceptions'), true));
+        $this->assertQueueIsEmpty($this->queue());
+    }
+
+    public function testRetriedMessageSucceeds(): void
+    {
+        $message = 'test-message-listen';
+        Config::set("rabbitmq-messages.message_handlers.$message", MockFailedMessageHandler::class);
+        MockFailedMessageHandler::$failures = 1;
+
+        $message = RabbitMQMessage::dispatchMessage($message, collect(static::makeFakePayload()))->fresh();
+        $this->consumeOnce();
+        $this->assertDatabaseEmpty('listen_message');
+
+        $this->waitForRetry();
+        $this->consumeOnce();
+
+        $actualMessage = ListenMessageModel::findByUuid($message->uuid);
+        $this->assertEquals(ListenMessageStatusEnum::PROCESSED, $actualMessage->status);
+        $this->assertEquals(1, data_get($actualMessage->properties, MessageResilient::getTriesKey()));
     }
 
     public function testDeadLetterMessage(): void
@@ -183,216 +162,175 @@ class ListenMessageTest extends TestCase
         $message = 'test-message-listen';
         Config::set("rabbitmq-messages.message_handlers.$message", MockFailedMessageHandler::class);
         Config::set('rabbitmq-messages.max_tries', $maxRetries = 1);
-        Config::set('queue.connections.rabbitmq.retry_queue_delay', 1000);
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
-        $configurations = $this->declareQueue();
 
-        $payload = collect(static::makeFakePayload());
-        RabbitMQMessage::dispatchMessage($message, $payload)->fresh();
+        RabbitMQMessage::dispatchMessage($message, collect(static::makeFakePayload()));
 
-        $sleep = ceil(config('queue.connections.rabbitmq.retry_queue_delay') / 1000);
         for ($i = 0; $i < $maxRetries; $i++) {
-            $this->assertConsume($configurations['queue']);
-            sleep($sleep);
+            $this->consumeOnce();
+            $this->waitForRetry();
         }
 
-        $this->assertConsume($configurations['queue']);
+        $this->consumeOnce();
 
         $this->assertDatabaseEmpty('listen_message');
-        $this->assertQueueIsEmpty($configurations['queue']);
-        $this->assertQueueIsNotEmpty(config('queue.connections.rabbitmq.dead_letter_queue'));
+        $this->assertQueueIsEmpty($this->queue());
+        $this->assertQueueIsNotEmpty($this->deadLetterQueue());
     }
 
-    /**
-     * @return void
-     */
     public function testDeadLetterInvalidMessages(): void
     {
         $message = 'some-invalid-message';
         Config::set("rabbitmq-messages.message_handlers.$message", MockInvalidMessageHandler::class);
         Config::set('rabbitmq-messages.max_tries', 3);
-        Config::set('queue.connections.rabbitmq.retry_queue_delay', 1000);
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
-        $configurations = $this->declareQueue();
 
-        $message = $this->mockInvalidMessage($message);
-        RabbitMQMessage::dispatchMessage($message)->fresh();
-
-        $this->assertConsume($configurations['queue']);
+        RabbitMQMessage::dispatchMessage(new DispatchMessage($message, collect()));
+        $this->consumeOnce();
 
         $this->assertDatabaseEmpty('listen_message');
-        $this->assertQueueIsEmpty($configurations['queue']);
-        $this->assertQueueIsNotEmpty(config('queue.connections.rabbitmq.dead_letter_queue'));
+        $this->assertQueueIsEmpty($this->queue());
+        $this->assertQueueIsEmpty($this->retryQueue());
+        $this->assertQueueIsNotEmpty($this->deadLetterQueue());
     }
 
-    /**
-     * @param string $name
-     * @return DispatchMessage
-     */
-    protected function mockInvalidMessage(string $name): DispatchMessage
+    public function testNonRetriableMessageIsStoredAsFailedWithoutDeadLetterQueue(): void
     {
-        return new DispatchMessage($name, collect());
-    }
+        $message = 'some-invalid-message';
+        Config::set("rabbitmq-messages.message_handlers.$message", MockInvalidMessageHandler::class);
+        Config::set('rabbitmq-messages.connections.rabbitmq.dead_letter.queue', '');
 
-    /**
-     * @param string $connection
-     * @return DispatchMessageModel
-     */
-    protected function mockEmptyMessage(string $connection = 'rabbitmq'): DispatchMessageModel
-    {
-        $mock = new class extends DispatchMessageModel {
-            public function save(array $options = []): bool
-            {
-                return true;
-            }
-        };
-        $mock->properties = collect();
-        $mock->payload = collect();
-        $mock->metadata = collect([
-            'connection' => $connection,
-            'exchange' => config("queue.connections.$connection.options.queue.exchange"),
-            'exchange_type' => config("queue.connections.$connection.options.queue.exchange_type"),
-            'routing_key' => config("queue.connections.$connection.options.queue.exchange_routing_key"),
-        ]);
+        $dispatched = RabbitMQMessage::dispatchMessage(new DispatchMessage($message, collect()));
+        $this->consumeOnce();
 
-        return $mock;
+        $actualMessage = ListenMessageModel::findByUuid($dispatched->uuid);
+        $this->assertEquals(ListenMessageStatusEnum::FAILED, $actualMessage->status);
+        $this->assertDatabaseCount('listen_message', 1);
+        $this->assertQueueIsEmpty($this->queue());
     }
 
     public function testDeadLetterMessageInAllConnections(): void
     {
-        $connections = ['rabbitmq', 'rabbitmq_topic'];
-        foreach ($connections as $connection) {
-            logger()->info('testing connection' , compact('connection'));
+        foreach (['rabbitmq', 'rabbitmq_topic'] as $connection) {
             $message = 'test-message-listen';
             Config::set("rabbitmq-messages.message_handlers.$message", MockFailedMessageHandler::class);
-            Config::set('rabbitmq-messages.max_tries', $maxRetries = 1);
-            Config::set("queue.connections.$connection.retry_queue_delay", 1000);
-            $this->app->register(RabbitMQMessagesServiceProvider::class);
-            $configurations = $this->declareQueue($connection);
+            Config::set('rabbitmq-messages.max_tries', 1);
 
-            $payload = collect(static::makeFakePayload());
-            RabbitMQMessage::dispatchMessage($message, $payload, $connection)->fresh();
+            RabbitMQMessage::dispatchMessage($message, collect(static::makeFakePayload()), $connection);
 
-            $sleep = ceil(config("queue.connections.$connection.retry_queue_delay") / 1000);
-            for ($i = 0; $i < $maxRetries; $i++) {
-                $this->assertConsume($configurations['queue']);
-                sleep($sleep);
-            }
-
-            $this->assertConsume($configurations['queue']);
+            $this->consumeOnce($connection);
+            $this->waitForRetry();
+            $this->consumeOnce($connection);
 
             $this->assertDatabaseEmpty('listen_message');
-            $this->assertQueueIsEmpty($configurations['queue']);
-            $this->assertQueueIsNotEmpty(config("queue.connections.$connection.dead_letter_queue"));
+            $this->assertQueueIsEmpty($this->queue());
+
+            $deadLetter = $this->getMessage(config("rabbitmq-messages.connections.$connection.dead_letter.queue"));
+            $this->assertNotNull($deadLetter, "connection [$connection]");
+            $headers = $deadLetter->get('application_headers')->getNativeData();
+            $this->assertEquals(config("rabbitmq-messages.connections.$connection.exchange"), $headers[MessageResilient::ORIGIN_EXCHANGE_HEADER]);
         }
     }
 
     public function testSkipInvalidMessage(): void
     {
-        $this->app->register(RabbitMQMessagesServiceProvider::class);
-        $configurations = $this->declareQueue();
-        $connection = 'rabbitmq';
+        $empty = new class extends DispatchMessageModel
+        {
+            public function save(array $options = []): bool
+            {
+                return true;
+            }
+        };
+        $empty->properties = collect();
+        $empty->payload = collect();
+        $empty->metadata = collect(['connection' => 'rabbitmq', 'exchange' => 'amq.fanout', 'exchange_type' => 'fanout', 'routing_key' => '']);
 
-        /** @var RabbitMQQueue $rabbitmq */
-        $rabbitmq = Queue::connection($connection);
-        $rabbitmq->dispatchMessage($this->mockEmptyMessage());
-        $this->assertConsume($configurations['queue']);
+        $this->app->make(AmqpPublisher::class)->publish($empty);
+        $this->consumeOnce();
 
         $this->assertDatabaseEmpty('listen_message');
-        $this->assertQueueIsEmpty($configurations['queue']);
-        $this->assertQueueIsEmpty(config('queue.connections.rabbitmq.dead_letter_queue'));
+        $this->assertQueueIsEmpty($this->queue());
+        $this->assertQueueIsEmpty($this->deadLetterQueue());
     }
 
-    protected static function makeFakePayload(): array
+    public function testQueueCommandsSupportedByTheDriver(): void
     {
-        return [
-            'name' => fake()->name,
-            'last_name' => fake()->lastName,
-            'birth_date' => fake()->date,
-            'notes' => fake()->paragraph,
-        ];
+        RabbitMQMessage::dispatchMessage('test-message-listen', collect());
+        RabbitMQMessage::dispatchMessage('test-message-listen', collect());
+
+        $this->assertEquals(2, Queue::connection('rabbitmq')->size($this->queue()));
+
+        $this->artisan('queue:monitor', ['queues' => 'rabbitmq:'.$this->queue(), '--max' => 1])
+            ->expectsOutputToContain('ALERT')
+            ->assertSuccessful();
+
+        $this->artisan('queue:clear', ['connection' => 'rabbitmq', '--queue' => $this->queue(), '--force' => true])
+            ->assertSuccessful();
+
+        $this->assertEquals(0, Queue::connection('rabbitmq')->size($this->queue()));
+        $this->assertEquals(0, Queue::connection('rabbitmq')->size('a-queue-that-does-not-exist'));
     }
 
-    /**
-     * @param string $connection
-     * @return array
-     */
-    protected function declareQueue(string $connection = 'rabbitmq'): array
+    public function testQueueCommandsDefaultToTheConsumerQueue(): void
     {
-        $exchange = config("queue.connections.{$connection}.options.queue.exchange");
-        $exchangeType = config("queue.connections.{$connection}.options.queue.exchange_type");
-        $exchangeRoutingKey = config("queue.connections.{$connection}.options.queue.exchange_routing_key");
-        $queue = config("queue.connections.{$connection}.queue");
+        Config::set('rabbitmq-messages.message_handlers', ['/.*/' => MockMessageHandler::class]);
+        $message = RabbitMQMessage::dispatchMessage('test-message-listen', collect());
 
-        $this->artisan('rabbitmq:exchange-declare', [
-            'name' => $exchange,
-            'connection' => $connection,
-            '--type' => $exchangeType,
-        ])->assertOk();
+        // no --queue: Laravel falls back to queue.connections.rabbitmq.queue
+        $this->artisan('queue:work', ['connection' => 'rabbitmq', '--once' => true, '--sleep' => 0])->assertSuccessful();
+        $this->assertDatabaseHas('listen_message', ['uuid' => $message->uuid]);
 
-        $this->artisan('rabbitmq:queue-declare', [
-            'name' => $queue,
-            'connection' => $connection,
-        ])->assertOk();
-
-        $this->artisan('rabbitmq:queue-bind', [
-            'queue' => $queue,
-            'exchange' => $exchange,
-            'connection' => $connection,
-            '--routing-key' => $exchangeRoutingKey,
-        ])->assertOk();
-
-        $this->artisan('rabbitmq:queue-purge', [
-            'queue' => $queue,
-            'connection' => $connection,
-        ])->assertOk();
-
-        return [
-            'exchange' => $exchange,
-            'exchange_type' => $exchangeType,
-            'exchange_routing_key' => $exchangeRoutingKey,
-            'queue' => $queue,
-        ];
+        RabbitMQMessage::dispatchMessage('test-message-listen', collect());
+        $this->artisan('queue:clear', ['connection' => 'rabbitmq', '--force' => true])->assertSuccessful();
+        $this->assertQueueIsEmpty($this->queue());
     }
 
-    /**
-     * @param string $queue
-     * @param string $connection
-     * @return void
-     */
-    protected function assertQueueIsEmpty(string $queue, string $connection = 'rabbitmq'): void
+    public function testSetupExplainsIncompatibleV1RetryQueues(): void
     {
-        /** @var RabbitMQQueue $rabbitmq */
-        $rabbitmq = Queue::connection($connection);
+        $legacy = 'rabbitmq-messages.tests.retry-v1';
+        $channel = $this->channel();
+        $channel->queue_delete($legacy);
+        // v1 retry queues dead-lettered to the exchange
+        $channel->queue_declare($legacy, false, true, false, false, false, new AMQPTable([
+            'x-dead-letter-exchange' => 'amq.fanout',
+            'x-message-ttl' => 3000,
+        ]));
 
-        $this->assertNull($rabbitmq->getChannel()->basic_get($queue, true));
+        Config::set('rabbitmq-messages.connections.rabbitmq.retry.queue', $legacy);
+
+        try {
+            $this->artisan('rabbitmq-messages:setup', ['connection' => ['rabbitmq']])
+                ->expectsOutputToContain('PRECONDITION_FAILED')
+                ->assertFailed();
+        } finally {
+            $this->channel()->queue_delete($legacy);
+        }
     }
 
-    /**
-     * @param string $queue
-     * @param string $connection
-     * @return void
-     */
-    protected function assertQueueIsNotEmpty(string $queue, string $connection = 'rabbitmq'): void
+    public function testStopWhenEmpty(): void
     {
-        /** @var RabbitMQQueue $rabbitmq */
-        $rabbitmq = Queue::connection($connection);
-
-        $this->assertNotNull($rabbitmq->getChannel()->basic_get($queue, true));
+        $this->artisan('queue:work', [
+            'connection' => 'rabbitmq',
+            '--queue' => $this->queue(),
+            '--stop-when-empty' => true,
+        ])->assertSuccessful();
     }
 
-    /**
-     * @param string $queue
-     * @param string $connection
-     * @return void
-     */
-    protected function assertConsume(string $queue, string $connection = 'rabbitmq'): void
+    protected function queue(): string
     {
-        $this->artisan('rabbitmq:consume', [
-            'connection' => $connection,
-            '--name' => $queue,
-            '--queue' => $queue,
-            '--once' => true,
-        ])->assertOk();
+        return config('rabbitmq-messages.connections.rabbitmq.queue');
+    }
+
+    protected function retryQueue(): string
+    {
+        return config('rabbitmq-messages.connections.rabbitmq.retry.queue');
+    }
+
+    protected function deadLetterQueue(): string
+    {
+        return config('rabbitmq-messages.connections.rabbitmq.dead_letter.queue');
+    }
+
+    protected function waitForRetry(): void
+    {
+        usleep((int) (config('rabbitmq-messages.connections.rabbitmq.retry.delay') * 1000) + 300_000);
     }
 }

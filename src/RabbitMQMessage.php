@@ -11,13 +11,14 @@ use Throwable;
 
 /**
  * Class RabbitMQMessage
+ *
  * @package SlothDevGuy\RabbitMQMessages
  *
- * @method static DispatchMessageModel dispatchMessage(string|DispatchMessage $message, Enumerable $payload = null, string $connection = null)
- * @method static bool canRetryMessages(string $connection = null)
- * @method static ListenMessageModel retryMessage(ListenMessageModel $message, Throwable $reason, string $connection = null)
- * @method static bool canDeadLetterMessages(string $connection = null)
- * @method static ListenMessageModel deadLetterMessage(ListenMessageModel $message, string $connection = null)
+ * @method static DispatchMessageModel dispatchMessage(string|DispatchMessage $message, ?Enumerable $payload = null, ?string $connection = null)
+ * @method static bool canRetryMessages(?string $connection = null)
+ * @method static ListenMessageModel retryMessage(ListenMessageModel $message, Throwable $reason, ?string $connection = null)
+ * @method static bool canDeadLetterMessages(?string $connection = null)
+ * @method static ListenMessageModel deadLetterMessage(ListenMessageModel $message, ?string $connection = null)
  *
  * @see FacadeService
  */
