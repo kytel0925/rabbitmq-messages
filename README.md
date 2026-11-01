@@ -393,7 +393,7 @@ Remember `php artisan queue:restart` after each deployment.
 |---|---|
 | `rabbitmq-messages:install [--connections=all\|fanout\|topic] [--force]` | Publish config, migrations and worker scripts; print suggested `.env` variables. |
 | `rabbitmq-messages:setup [connection...] [--queue=]` | Declare exchanges, consumer queue, bindings, retry and dead letter queues (idempotent). Replaces `rabbitmq:exchange-declare`, `rabbitmq:queue-declare` and `rabbitmq:queue-bind`. |
-| `rabbitmq-messages:rotate [days] [--table=] [--status=] [--chunk=] [--pretend] [--force]` | Delete finished inbox/outbox messages older than the retention, see [Message rotation](#message-rotation). |
+| `rabbitmq-messages:rotate [--retention-days=] [--table=] [--status=] [--chunk=] [--pretend] [--force]` | Delete finished inbox/outbox messages older than the retention, see [Message rotation](#message-rotation). |
 
 ### `php artisan queue:*` compatibility
 
@@ -419,7 +419,7 @@ Both tables grow with every event. A **single rotation with a single retention**
 inbox: `rabbitmq-messages:rotate` deletes every *finished* message whose last update (`updated_at`) is
 older than the retention, in primary-key chunks so it never holds long locks.
 
-The retention is the command's `days` argument. When it is omitted (as in the scheduled run) it defaults to
+The retention is the command's optional `--retention-days` option. When it is omitted (as in the scheduled run) it defaults to
 `RABBITMQ_MESSAGES_RETENTION_DAYS` (`rotation.retention_days`, 30); `php artisan rabbitmq-messages:rotate --help`
 shows the effective default.
 
@@ -435,7 +435,7 @@ shows the effective default.
     'schedule' => env('RABBITMQ_MESSAGES_ROTATION_CRON', '30 3 * * *'),   // daily at 03:30
     'on_one_server' => env('RABBITMQ_MESSAGES_ROTATION_ONE_SERVER', false),
     'chunk_size' => env('RABBITMQ_MESSAGES_ROTATION_CHUNK', 1000),
-    'retention_days' => env('RABBITMQ_MESSAGES_RETENTION_DAYS', 30),       // default of the [days] argument
+    'retention_days' => env('RABBITMQ_MESSAGES_RETENTION_DAYS', 30),       // default of --retention-days
 ],
 ```
 
@@ -450,14 +450,14 @@ plus `onOneServer()` when enabled; that needs a cache store with locks). Check i
 Without Laravel's scheduler, call the command from cron directly:
 
 ```cron
-30 3 * * * cd /path/to/app && php artisan rabbitmq-messages:rotate >> /dev/null 2>&1      # or: rotate 60
+30 3 * * * cd /path/to/app && php artisan rabbitmq-messages:rotate >> /dev/null 2>&1      # or: rotate --retention-days=60
 ```
 
 **Manual runs:**
 
 ```bash
 php artisan rabbitmq-messages:rotate                                            # retention from RABBITMQ_MESSAGES_RETENTION_DAYS
-php artisan rabbitmq-messages:rotate 7                                          # 7 days, overrides the environment
+php artisan rabbitmq-messages:rotate --retention-days=7                         # 7 days, overrides the environment
 php artisan rabbitmq-messages:rotate --pretend                                   # count only
 php artisan rabbitmq-messages:rotate --table=listen_message --status=failed      # narrow a manual cleanup
 php artisan rabbitmq-messages:rotate --force                                     # even if disabled

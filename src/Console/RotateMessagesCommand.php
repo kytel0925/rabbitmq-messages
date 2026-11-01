@@ -12,7 +12,7 @@ use SlothDevGuy\RabbitMQMessages\Support\MessagesConfig;
 class RotateMessagesCommand extends Command
 {
     protected $signature = 'rabbitmq-messages:rotate
-                            {days? : Retention in days [default: RABBITMQ_MESSAGES_RETENTION_DAYS = %s]}
+                            {--retention-days= : Delete finished messages older than this many days [default: RABBITMQ_MESSAGES_RETENTION_DAYS = %s]}
                             {--table=* : Only rotate these tables (dispatch_message, listen_message)}
                             {--status=* : Only rotate these statuses (dispatched, processed, failed)}
                             {--chunk= : Rows deleted per query (default: rabbitmq-messages.rotation.chunk_size)}
@@ -37,10 +37,10 @@ class RotateMessagesCommand extends Command
             return self::SUCCESS;
         }
 
-        // the argument wins; the environment (rotation.retention_days) is the default
-        $days = $this->argument('days') ?? MessageRotator::retentionDays();
+        // the option wins; the environment (rotation.retention_days) is the default
+        $days = $this->option('retention-days') ?? MessageRotator::retentionDays();
         if (! is_numeric($days) || (int) $days < 1 || (string) (int) $days !== (string) $days) {
-            $this->components->error('The retention must be a whole number of days >= 1 (argument [days] or RABBITMQ_MESSAGES_RETENTION_DAYS).');
+            $this->components->error('The retention must be a whole number of days >= 1 (--retention-days or RABBITMQ_MESSAGES_RETENTION_DAYS).');
 
             return self::FAILURE;
         }
