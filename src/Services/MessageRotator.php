@@ -8,61 +8,99 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Config;
 use SlothDevGuy\RabbitMQMessages\Exceptions\InvalidConfigurationException;
 use SlothDevGuy\RabbitMQMessages\Models\DispatchMessageModel;
+use SlothDevGuy\RabbitMQMessages\Models\Enums\DispatchMessageStatusEnum;
+use SlothDevGuy\RabbitMQMessages\Models\Enums\ListenMessageStatusEnum;
 use SlothDevGuy\RabbitMQMessages\Models\ListenMessageModel;
 use SlothDevGuy\RabbitMQMessages\Support\MessagesConfig;
 
 /**
- * Deletes old outbox (dispatch_message) and inbox (listen_message) rows.
+ * One rotation for the outbox (dispatch_message) and the inbox (listen_message).
  *
- * Rows are selected by status and last update (updated_at) and deleted in
- * primary-key chunks, so the job never holds long table locks.
+ * Finished messages whose last update (updated_at) is older than the
+ * retention are deleted in primary-key chunks, so the job never holds long
+ * table locks. Messages still in flight (created / queued) are never deleted.
  */
 class MessageRotator
 {
+    /**
+     * Rotated tables and their finished (rotatable) statuses.
+     */
     public const TABLES = [
-        'dispatch_message' => 'dispatch_message',
-        'listen_message' => 'listen_message',
+        'dispatch_message' => [
+            DispatchMessageStatusEnum::DISPATCHED->value,
+            DispatchMessageStatusEnum::FAILED->value,
+        ],
+        'listen_message' => [
+            ListenMessageStatusEnum::PROCESSED->value,
+            ListenMessageStatusEnum::FAILED->value,
+        ],
     ];
 
     /**
-     * @param  array<string, array<string, int|null>>|null  $retention  table => [status => days|null]
+     * @param  int|null  $days  retention in days (default: rabbitmq-messages.rotation.retention_days)
+     * @param  array<int, string>  $tables  only these tables (default: both)
+     * @param  array<int, string>  $statuses  only these statuses (default: every finished status)
      * @param  callable(string $table, string $status, int $deleted): void|null  $progress
      * @return array<string, array<string, int>> table => [status => deleted rows]
      */
     public function rotate(
-        ?array $retention = null,
+        ?int $days = null,
+        array $tables = [],
+        array $statuses = [],
         ?int $chunkSize = null,
         bool $pretend = false,
         ?Carbon $now = null,
         ?callable $progress = null,
     ): array {
-        $retention ??= (array) MessagesConfig::rotation('retention', []);
+        $days ??= static::retentionDays();
+        if ($days === null || $days < 1) {
+            throw new InvalidConfigurationException('The rotation retention must be at least 1 day (rabbitmq-messages.rotation.retention_days).');
+        }
+
         $chunkSize = max(1, $chunkSize ?? (int) MessagesConfig::rotation('chunk_size', 1000));
-        $now ??= Carbon::now();
+        $cutoff = ($now ?? Carbon::now())->copy()->subDays($days);
         $result = [];
 
-        foreach ($retention as $table => $statuses) {
+        foreach (static::TABLES as $table => $finished) {
+            if ($tables && ! in_array($table, $tables, true)) {
+                continue;
+            }
+
             $model = $this->model($table);
 
-            foreach ((array) $statuses as $status => $days) {
-                if ($days === null || $days === '' || (int) $days < 0) {
-                    continue; // keep forever
+            foreach ($finished as $status) {
+                if ($statuses && ! in_array($status, $statuses, true)) {
+                    continue;
                 }
 
-                $cutoff = $now->copy()->subDays((int) $days);
                 $deleted = $pretend
-                    ? $this->query($model, (string) $status, $cutoff)->count()
-                    : $this->deleteInChunks($model, (string) $status, $cutoff, $chunkSize);
+                    ? $this->query($model, $status, $cutoff)->count()
+                    : $this->deleteInChunks($model, $status, $cutoff, $chunkSize);
 
                 $result[$table][$status] = $deleted;
 
                 if ($progress) {
-                    $progress($table, (string) $status, $deleted);
+                    $progress($table, $status, $deleted);
                 }
             }
         }
 
         return $result;
+    }
+
+    public static function retentionDays(): ?int
+    {
+        $days = MessagesConfig::rotation('retention_days', 30);
+
+        return is_numeric($days) ? (int) $days : null;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public static function statuses(): array
+    {
+        return array_values(array_unique(array_merge(...array_values(static::TABLES))));
     }
 
     protected function deleteInChunks(Model $model, string $status, Carbon $cutoff, int $chunkSize): int
@@ -101,9 +139,6 @@ class MessageRotator
         $class = match ($table) {
             'dispatch_message' => Config::get('rabbitmq-messages.models.dispatch_message', DispatchMessageModel::class),
             'listen_message' => Config::get('rabbitmq-messages.models.listen_message', ListenMessageModel::class),
-            default => throw new InvalidConfigurationException(
-                "Unknown rotation table [$table]; expected one of: ".implode(', ', array_keys(static::TABLES))
-            ),
         };
 
         return Container::getInstance()->make($class);

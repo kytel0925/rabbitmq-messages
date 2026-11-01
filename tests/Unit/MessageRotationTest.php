@@ -37,13 +37,25 @@ class MessageRotationTest extends TestCase
         parent::tearDown();
     }
 
-    public function testRotateUsesTheConfiguredRetention(): void
+    public function testOneRetentionRotatesInboxAndOutbox(): void
     {
+        $this->artisan('rabbitmq-messages:rotate')
+            ->expectsOutputToContain('older than 30 day(s)')
+            ->assertSuccessful();
+
+        // finished rows older than 30 days are gone in both tables; in-flight rows are kept
+        $this->assertEquals(['processed' => 1, 'queued' => 1], $this->countByStatus('listen_message'));
+        $this->assertEquals(['dispatched' => 1, 'created' => 1], $this->countByStatus('dispatch_message'));
+    }
+
+    public function testRetentionIsConfigurable(): void
+    {
+        Config::set('rabbitmq-messages.rotation.retention_days', 120);
+
         $this->artisan('rabbitmq-messages:rotate')->assertSuccessful();
 
-        // processed > 30 days and failed > 90 days are gone; queued/created are kept forever
-        $this->assertEquals(['processed' => 1, 'failed' => 1, 'queued' => 1], $this->countByStatus('listen_message'));
-        $this->assertEquals(['dispatched' => 1, 'created' => 1], $this->countByStatus('dispatch_message'));
+        $this->assertDatabaseCount('listen_message', 5);
+        $this->assertDatabaseCount('dispatch_message', 3);
     }
 
     public function testPretendDoesNotDelete(): void
@@ -61,18 +73,22 @@ class MessageRotationTest extends TestCase
         $this->artisan('rabbitmq-messages:rotate', [
             '--table' => ['listen_message'],
             '--status' => ['failed'],
-            '--days' => 30,
+            '--days' => 50,
             '--chunk' => 1,
         ])->assertSuccessful();
 
-        $this->assertEquals(['processed' => 2, 'queued' => 1], $this->countByStatus('listen_message'));
+        $this->assertEquals(['processed' => 2, 'failed' => 1, 'queued' => 1], $this->countByStatus('listen_message'));
         $this->assertDatabaseCount('dispatch_message', 3);
     }
 
     public function testInvalidOptionsFail(): void
     {
         $this->artisan('rabbitmq-messages:rotate', ['--table' => ['jobs']])->assertFailed();
+        $this->artisan('rabbitmq-messages:rotate', ['--status' => ['queued']])->assertFailed();
         $this->artisan('rabbitmq-messages:rotate', ['--days' => 'abc'])->assertFailed();
+        $this->artisan('rabbitmq-messages:rotate', ['--days' => 0])->assertFailed();
+
+        $this->assertDatabaseCount('listen_message', 5);
     }
 
     public function testDisabledRotationDoesNothingUnlessForced(): void
@@ -83,7 +99,7 @@ class MessageRotationTest extends TestCase
         $this->assertDatabaseCount('listen_message', 5);
 
         $this->artisan('rabbitmq-messages:rotate', ['--force' => true])->assertSuccessful();
-        $this->assertDatabaseCount('listen_message', 3);
+        $this->assertDatabaseCount('listen_message', 2);
     }
 
     public function testRotationIsScheduled(): void

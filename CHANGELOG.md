@@ -14,8 +14,9 @@ See README, "Migrating from v1", for the upgrade steps and every behaviour chang
 - Clear "not supported" errors for queue operations and commands that do not apply to domain events,
   and warnings for ignored `queue:work` options (`--tries`, `--backoff`, `--delay`).
 - `rabbitmq-messages:setup` command (declares exchanges, queues, bindings, retry and dead letter queues).
-- Message rotation: `rabbitmq-messages:rotate` command, automatic scheduler registration and a
-  migration with `(status, updated_at)` indexes.
+- Message rotation: one `rabbitmq-messages:rotate` command and one retention (`retention_days`) for
+  both inbox and outbox, automatic scheduler registration (enabled by default, daily) and a migration
+  with `(status, updated_at)` indexes.
 - `IncomingMessageInterface` to decouple the listener pipeline from the AMQP client.
 - `outbox.*` configuration (queue connection/name, after-commit dispatch).
 - Orchestra Testbench based test suite, feature tests against a real broker, GitHub Actions matrix,

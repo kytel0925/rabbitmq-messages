@@ -209,16 +209,18 @@ return [
     | Message rotation
     |--------------------------------------------------------------------------
     |
-    | Deletes old rows from the dispatch_message and listen_message tables.
-    | Retention is expressed in days per status; null keeps the rows forever.
+    | One rotation for both the outbox (dispatch_message) and the inbox
+    | (listen_message): finished messages (dispatched, processed or failed)
+    | whose last update is older than "retention_days" are deleted. Messages
+    | still in flight (created / queued) are never rotated.
     |
     | IMPORTANT: listen_message rows are the idempotency (inbox) records. A
     | duplicated delivery that arrives after its row was rotated WILL be
-    | processed again, so keep "processed" well above the longest window in
+    | processed again, so keep the retention well above the longest window in
     | which a producer could re-publish or the broker could redeliver.
     |
-    | The command is registered in Laravel's scheduler automatically when
-    | "schedule" is enabled; you still need the usual `schedule:run` cron.
+    | The command is registered in Laravel's scheduler automatically; you
+    | still need the usual `schedule:run` cron entry.
     |
     */
     'rotation' => [
@@ -226,17 +228,6 @@ return [
         'schedule' => env('RABBITMQ_MESSAGES_ROTATION_CRON', '30 3 * * *'),
         'on_one_server' => (bool) env('RABBITMQ_MESSAGES_ROTATION_ONE_SERVER', false),
         'chunk_size' => (int) env('RABBITMQ_MESSAGES_ROTATION_CHUNK', 1000),
-        'retention' => [
-            'dispatch_message' => [
-                'dispatched' => (int) env('RABBITMQ_MESSAGES_RETENTION_DISPATCHED_DAYS', 30),
-                'failed' => (int) env('RABBITMQ_MESSAGES_RETENTION_DISPATCH_FAILED_DAYS', 90),
-                'created' => null,
-            ],
-            'listen_message' => [
-                'processed' => (int) env('RABBITMQ_MESSAGES_RETENTION_PROCESSED_DAYS', 30),
-                'failed' => (int) env('RABBITMQ_MESSAGES_RETENTION_LISTEN_FAILED_DAYS', 90),
-                'queued' => null,
-            ],
-        ],
+        'retention_days' => (int) env('RABBITMQ_MESSAGES_RETENTION_DAYS', 30),
     ],
 ];

@@ -159,7 +159,8 @@ Everything lives in `config/rabbitmq-messages.php`. The most relevant keys:
 | `models.*` | package models | Swap the Eloquent models (they must extend the package ones). |
 | `message_handlers` | `[]` | Event name (or `/regex/`) ⇒ handler class. |
 | `max_tries` | `3` | Retries before dead-lettering. `0` disables retries. |
-| `rotation.*` | see [Message rotation](#message-rotation) | Retention and schedule of the cleanup job. |
+| `rotation.retention_days` | `30` | One retention for inbox and outbox, see [Message rotation](#message-rotation). |
+| `rotation.*` | see [Message rotation](#message-rotation) | Schedule and switches of the cleanup job. |
 
 A connection is both a **publishing destination** and a **consumer definition**. Several connections may
 share one consumer queue: the default config binds `RABBITMQ_QUEUE` to `amq.fanout` (connection `rabbitmq`)
@@ -392,7 +393,7 @@ Remember `php artisan queue:restart` after each deployment.
 |---|---|
 | `rabbitmq-messages:install [--connections=all\|fanout\|topic] [--force]` | Publish config, migrations and worker scripts; print suggested `.env` variables. |
 | `rabbitmq-messages:setup [connection...] [--queue=]` | Declare exchanges, consumer queue, bindings, retry and dead letter queues (idempotent). Replaces `rabbitmq:exchange-declare`, `rabbitmq:queue-declare` and `rabbitmq:queue-bind`. |
-| `rabbitmq-messages:rotate [--table=] [--status=] [--days=] [--chunk=] [--pretend] [--force]` | Delete old messages, see [Message rotation](#message-rotation). |
+| `rabbitmq-messages:rotate [--days=] [--table=] [--status=] [--chunk=] [--pretend] [--force]` | Delete finished inbox/outbox messages older than the retention, see [Message rotation](#message-rotation). |
 
 ### `php artisan queue:*` compatibility
 
@@ -414,8 +415,14 @@ The `rabbitmq-messages` driver implements only what consuming domain events need
 
 ## Message rotation
 
-Both tables grow with every event. `rabbitmq-messages:rotate` deletes rows by **status** and **age**
-(`updated_at`), in primary-key chunks so it never holds long locks:
+Both tables grow with every event. A **single rotation with a single retention** covers the outbox and the
+inbox: `rabbitmq-messages:rotate` deletes every *finished* message whose last update (`updated_at`) is
+older than `retention_days`, in primary-key chunks so it never holds long locks.
+
+| Table | Rotated (finished) | Never rotated (in flight) |
+|---|---|---|
+| `dispatch_message` (outbox) | `dispatched`, `failed` | `created` |
+| `listen_message` (inbox) | `processed`, `failed` | `queued` |
 
 ```php
 // config/rabbitmq-messages.php
@@ -423,11 +430,8 @@ Both tables grow with every event. `rabbitmq-messages:rotate` deletes rows by **
     'enabled' => env('RABBITMQ_MESSAGES_ROTATION_ENABLED', true),
     'schedule' => env('RABBITMQ_MESSAGES_ROTATION_CRON', '30 3 * * *'),   // daily at 03:30
     'on_one_server' => env('RABBITMQ_MESSAGES_ROTATION_ONE_SERVER', false),
-    'chunk_size' => 1000,
-    'retention' => [   // days; null = keep forever
-        'dispatch_message' => ['dispatched' => 30, 'failed' => 90, 'created' => null],
-        'listen_message'   => ['processed' => 30, 'failed' => 90, 'queued' => null],
-    ],
+    'chunk_size' => env('RABBITMQ_MESSAGES_ROTATION_CHUNK', 1000),
+    'retention_days' => env('RABBITMQ_MESSAGES_RETENTION_DAYS', 30),       // inbox and outbox
 ],
 ```
 
@@ -449,15 +453,16 @@ Without Laravel's scheduler, call the command from cron directly:
 
 ```bash
 php artisan rabbitmq-messages:rotate --pretend                                   # count only
-php artisan rabbitmq-messages:rotate --table=listen_message --status=failed --days=14
+php artisan rabbitmq-messages:rotate --days=7                                    # one-off shorter retention
+php artisan rabbitmq-messages:rotate --table=listen_message --status=failed      # narrow a manual cleanup
 php artisan rabbitmq-messages:rotate --force                                     # even if disabled
 ```
 
 > ⚠️ **Rotation and idempotency.** `listen_message` rows *are* the idempotency records. A duplicate of a
-> message that arrives after its row was rotated is processed again. Keep `processed` retention well above
+> message that arrives after its row was rotated is processed again. Keep `retention_days` well above
 > the longest window in which a producer could re-publish (outbox retries, `queue:retry` of old failed jobs)
 > or messages could sit in a queue. `created`/`queued` rows (not yet published / in progress) are never
-> rotated by default.
+> rotated.
 
 Run the index migration published by `rabbitmq-messages:install`
 (`add_rotation_indexes_to_rabbitmq_messages_tables`) so the cleanup stays cheap on large tables.
@@ -551,8 +556,9 @@ v1 extended `vladimir-yuldashev/laravel-queue-rabbitmq`. v2 removes that depende
   a body that is not valid JSON is rejected (dropped) instead of being handled with an empty payload.
 * A non-retriable message whose inbox row already existed is now marked `failed` when there is no dead letter
   queue (v1 left it `queued`).
-* Message rotation is **enabled by default** and scheduled daily: rows older than 30 days (`processed`/`dispatched`)
-  and 90 days (`failed`) are deleted. Set `RABBITMQ_MESSAGES_ROTATION_ENABLED=false` to opt out.
+* Message rotation is **enabled by default** and scheduled daily: finished inbox and outbox rows
+  (`dispatched`, `processed`, `failed`) older than `RABBITMQ_MESSAGES_RETENTION_DAYS` (30) are deleted.
+  Set `RABBITMQ_MESSAGES_ROTATION_ENABLED=false` to opt out.
 * PHP 8.1 and Laravel 10 are no longer supported.
 
 ### API changes (only relevant if you extended internals)
