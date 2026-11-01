@@ -8,6 +8,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use SlothDevGuy\RabbitMQMessages\Console\RotateMessagesCommand;
 use SlothDevGuy\RabbitMQMessagesTests\TestCase;
 
 class MessageRotationTest extends TestCase
@@ -58,6 +59,26 @@ class MessageRotationTest extends TestCase
         $this->assertDatabaseCount('dispatch_message', 3);
     }
 
+    public function testArgumentOverridesTheEnvironmentDefault(): void
+    {
+        Config::set('rabbitmq-messages.rotation.retention_days', 120);
+
+        $this->artisan('rabbitmq-messages:rotate', ['days' => 45])
+            ->expectsOutputToContain('older than 45 day(s)')
+            ->assertSuccessful();
+
+        // 45 days: only the 100-day-old failed row goes (120 would keep it, 30 would also drop the 40-day-old rows)
+        $this->assertEquals(['processed' => 2, 'failed' => 1, 'queued' => 1], $this->countByStatus('listen_message'));
+    }
+
+    public function testHelpShowsTheEnvironmentDefault(): void
+    {
+        $command = $this->app->make(RotateMessagesCommand::class);
+
+        $this->assertStringContainsString('RABBITMQ_MESSAGES_RETENTION_DAYS = 30', $command->getDefinition()->getArgument('days')->getDescription());
+        $this->assertNull($command->getDefinition()->getArgument('days')->getDefault());
+    }
+
     public function testPretendDoesNotDelete(): void
     {
         $this->artisan('rabbitmq-messages:rotate', ['--pretend' => true])
@@ -73,7 +94,7 @@ class MessageRotationTest extends TestCase
         $this->artisan('rabbitmq-messages:rotate', [
             '--table' => ['listen_message'],
             '--status' => ['failed'],
-            '--days' => 50,
+            'days' => 50,
             '--chunk' => 1,
         ])->assertSuccessful();
 
@@ -85,8 +106,9 @@ class MessageRotationTest extends TestCase
     {
         $this->artisan('rabbitmq-messages:rotate', ['--table' => ['jobs']])->assertFailed();
         $this->artisan('rabbitmq-messages:rotate', ['--status' => ['queued']])->assertFailed();
-        $this->artisan('rabbitmq-messages:rotate', ['--days' => 'abc'])->assertFailed();
-        $this->artisan('rabbitmq-messages:rotate', ['--days' => 0])->assertFailed();
+        $this->artisan('rabbitmq-messages:rotate', ['days' => 'abc'])->assertFailed();
+        $this->artisan('rabbitmq-messages:rotate', ['days' => 0])->assertFailed();
+        $this->artisan('rabbitmq-messages:rotate', ['days' => '1.5'])->assertFailed();
 
         $this->assertDatabaseCount('listen_message', 5);
     }

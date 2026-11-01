@@ -12,7 +12,7 @@ use SlothDevGuy\RabbitMQMessages\Support\MessagesConfig;
 class RotateMessagesCommand extends Command
 {
     protected $signature = 'rabbitmq-messages:rotate
-                            {--days= : Retention in days (default: rabbitmq-messages.rotation.retention_days)}
+                            {days? : Retention in days [default: RABBITMQ_MESSAGES_RETENTION_DAYS = %s]}
                             {--table=* : Only rotate these tables (dispatch_message, listen_message)}
                             {--status=* : Only rotate these statuses (dispatched, processed, failed)}
                             {--chunk= : Rows deleted per query (default: rabbitmq-messages.rotation.chunk_size)}
@@ -20,6 +20,14 @@ class RotateMessagesCommand extends Command
                             {--force : Run even when rotation is disabled in the configuration}';
 
     protected $description = 'Delete finished outbox and inbox messages older than the retention to preserve database space';
+
+    public function __construct()
+    {
+        // show the effective default (env RABBITMQ_MESSAGES_RETENTION_DAYS) in --help
+        $this->signature = sprintf($this->signature, MessageRotator::retentionDays() ?? 'not set');
+
+        parent::__construct();
+    }
 
     public function handle(MessageRotator $rotator): int
     {
@@ -29,9 +37,10 @@ class RotateMessagesCommand extends Command
             return self::SUCCESS;
         }
 
-        $days = $this->option('days') ?? MessageRotator::retentionDays();
-        if (! is_numeric($days) || (int) $days < 1) {
-            $this->components->error('The retention must be a whole number of days >= 1 (--days or rabbitmq-messages.rotation.retention_days).');
+        // the argument wins; the environment (rotation.retention_days) is the default
+        $days = $this->argument('days') ?? MessageRotator::retentionDays();
+        if (! is_numeric($days) || (int) $days < 1 || (string) (int) $days !== (string) $days) {
+            $this->components->error('The retention must be a whole number of days >= 1 (argument [days] or RABBITMQ_MESSAGES_RETENTION_DAYS).');
 
             return self::FAILURE;
         }
