@@ -591,6 +591,7 @@ docker compose exec php.dev vendor/bin/phpunit
 * `tests/Feature` publishes and consumes through a real RabbitMQ (`RABBITMQ_HOST`, `RABBITMQ_USERNAME`…);
   the tests are skipped when the broker is unreachable.
 * `vendor/bin/pint` formats the code; CI runs the PHP × Laravel matrix with a RabbitMQ service.
+* Commit style (gitmoji), authorship, signing and pull request rules: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
